@@ -1,0 +1,10 @@
+[package]
+name = "osu2sm"
+version = "0.1.0"
+authors = ["negamartin <martin.andrighetti@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "1"
+walkdir = "2"
+fxhash = "0.2"
