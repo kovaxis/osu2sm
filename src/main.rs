@@ -122,6 +122,12 @@ struct Opts {
     /// A logspec string (see
     // https://https://docs.rs/flexi_logger/0.16.1/flexi_logger/struct.LogSpecification.html).
     log: String,
+    /// Whether to log to a file.
+    log_file: bool,
+    /// Enable logging to stderr.
+    log_stderr: bool,
+    /// Enable logging to stdout.
+    log_stdout: bool,
 }
 impl Default for Opts {
     fn default() -> Opts {
@@ -138,12 +144,36 @@ impl Default for Opts {
             ignore_mode_errors: true,
             offset: 0.,
             log: "info".to_string(),
+            log_file: true,
+            log_stderr: true,
+            log_stdout: false,
         }
     }
 }
 impl Opts {
     fn apply(&self) {
-        if let Err(err) = flexi_logger::Logger::with_str(&self.log).start() {
+        let log_target = if self.log_file {
+            flexi_logger::LogTarget::File
+        } else {
+            flexi_logger::LogTarget::DevNull
+        };
+        let log_stderr = if self.log_stderr {
+            flexi_logger::Duplicate::All
+        } else {
+            flexi_logger::Duplicate::None
+        };
+        let log_stdout = if self.log_stdout {
+            flexi_logger::Duplicate::All
+        } else {
+            flexi_logger::Duplicate::None
+        };
+
+        if let Err(err) = flexi_logger::Logger::with_str(&self.log)
+            .log_target(log_target)
+            .duplicate_to_stderr(log_stderr)
+            .duplicate_to_stdout(log_stdout)
+            .start()
+        {
             eprintln!("error initializing logger: {:#}", err);
         }
     }
@@ -525,7 +555,11 @@ fn run() -> Result<()> {
         opts
     } else {
         //Load/save config from default path
-        let mut cfg_path = std::env::current_exe().unwrap_or_default();
+        let mut cfg_path: PathBuf = std::env::current_exe()
+            .unwrap_or_default()
+            .file_name()
+            .unwrap_or_default()
+            .into();
         cfg_path.set_extension("config.txt");
         match load_cfg(&cfg_path) {
             Ok(opts) => {
