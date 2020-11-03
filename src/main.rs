@@ -75,6 +75,9 @@ struct Opts {
     /// Whether to ignore incompatible-mode errors (there are too many and they are not terribly
     /// useful).
     ignore_mode_errors: bool,
+    /// How much offset to apply to osu! HitObject and TimingPoint times when converting them
+    /// to StepMania simfiles, in milliseconds.
+    offset: f64,
 }
 impl Default for Opts {
     fn default() -> Opts {
@@ -84,6 +87,7 @@ impl Default for Opts {
             unicode: false,
             copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
             ignore_mode_errors: false,
+            offset: 0.,
         }
     }
 }
@@ -95,7 +99,7 @@ struct Ctx {
 fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()>) -> Result<()> {
     let mut by_depth: Vec<Vec<PathBuf>> = Vec::new();
     for entry in WalkDir::new(&ctx.opts.input).contents_first(true) {
-        let entry = entry?;
+        let entry = entry.context("failed to scan input directory")?;
         let depth = entry.depth();
         if depth < by_depth.len() {
             //Close directories
@@ -131,7 +135,7 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
 }
 
 fn process_beatmap(ctx: &Ctx, bmset_path: &Path, bm_path: &Path) -> Result<Simfile> {
-    let bm = Beatmap::parse(bm_path).context("read/parse beatmap file")?;
+    let bm = Beatmap::parse(ctx, bm_path).context("read/parse beatmap file")?;
     let sm = conv::convert(ctx, bmset_path, bm_path, bm)?;
     Ok(sm)
 }
@@ -162,7 +166,11 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
                     out_sms.push(sm);
                 }
             }
-            Err(err) => eprintln!("  error processing beatmap \"{}\": {:#}", bm_name, err),
+            Err(err) => {
+                if !ctx.opts.ignore_mode_errors || !err.to_string().contains("mode not supported") {
+                    eprintln!("  error processing beatmap \"{}\": {:#}", bm_name, err);
+                }
+            }
         }
     }
     //Write output simfiles
@@ -213,12 +221,57 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
                     println!("  copying file dependency \"{}\"", dep_name.display());
                     let dep_src = bmset_path.join(dep_name);
                     let dep_dst = out_base.join(dep_name);
-                    fs::hard_link(&dep_src, &dep_dst).context("failed to create hardlink")?;
+                    copy_with_method(ctx, &dep_src, &dep_dst)?;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn copy_with_method(ctx: &Ctx, src: &Path, dst: &Path) -> Result<()> {
+    let mut errors: Vec<Error> = Vec::new();
+    macro_rules! method {
+        ($($code:tt)*) => {{
+            match {$($code)*} {
+                Ok(()) => {
+                    return Ok(());
+                }
+                Err(err) => {
+                    errors.push(err);
+                }
+            }
+        }};
+    }
+    for method in ctx.opts.copy.iter() {
+        match method {
+            CopyMethod::Copy => method! {
+                fs::copy(src, dst).context("failed to do standard copy")?;
+                Ok(())
+            },
+            CopyMethod::Hardlink => method! {
+                fs::hard_link(src, dst).context("failed to create hardlink")?;
+                Ok(())
+            },
+            CopyMethod::Symlink => method! {
+                #[allow(deprecated)]
+                {
+                    fs::soft_link(src, dst).context("failed to create symlink")?;
+                }
+                Ok(())
+            },
+        }
+    }
+    //Ran out of methods
+    let mut errstr = format!(
+        "could not copy file from \"{}\" to \"{}\":",
+        src.display(),
+        dst.display()
+    );
+    for err in errors {
+        write!(errstr, "\n  {:#}", err).unwrap();
+    }
+    bail!(errstr)
 }
 
 fn load_cfg(path: &Path) -> Result<Opts> {

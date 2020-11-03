@@ -56,8 +56,9 @@ impl Default for Beatmap {
     }
 }
 impl Beatmap {
-    pub(crate) fn parse(path: &Path) -> Result<Beatmap> {
+    pub(crate) fn parse(ctx: &Ctx, path: &Path) -> Result<Beatmap> {
         use Category::*;
+
         #[derive(Copy, Clone, Debug)]
         enum Category {
             General,
@@ -68,24 +69,16 @@ impl Beatmap {
             HitObjects,
             Unknown,
         }
-        let mut category = Category::Unknown;
-        let mut bm = Beatmap::default();
-        let mut lines = BufReader::new(File::open(path).context("open file")?).lines();
-        ensure!(
-            lines
-                .next()
-                .map(|res| res.unwrap_or_default())
-                .unwrap_or_default()
-                //Remove stupid UTF-8 BOM
-                .trim_start_matches('\u{feff}')
-                .trim_start()
-                .starts_with("osu file format v"),
-            "not an osu! beatmap file"
-        );
+
+        fn strip_line(line: &str) -> &str {
+            line.find("//").map(|c| &line[..c]).unwrap_or(line).trim()
+        }
+
         fn parse_as<T: std::str::FromStr>(s: &str, name: &str) -> Result<T> {
             s.parse::<T>()
                 .map_err(|_| anyhow!("invalid {} \"{}\"", name, s))
         }
+
         fn parse_filename(path: &str) -> String {
             if path.starts_with('"') && path.ends_with('"') {
                 &path[1..path.len() - 1]
@@ -94,6 +87,7 @@ impl Beatmap {
             }
             .to_string()
         }
+
         fn get_component<'a, T: std::str::FromStr, I: Iterator<Item = &'a str>>(
             iter: &mut I,
             name: &str,
@@ -106,12 +100,40 @@ impl Beatmap {
                 .parse::<T>()
                 .map_err(|_| anyhow!("invalid {} \"{}\"", name, textual))
         }
+
+        let mut category = Category::Unknown;
+        let mut bm = Beatmap::default();
+        let mut lines = BufReader::new(File::open(path).context("open file")?).lines();
+        let mut line_num = 0;
+
+        //Find osu header
+        let mut global_offset = ctx.opts.offset;
+        for line in &mut lines {
+            let line = line?;
+            line_num += 1;
+            //Remove stupid UTF-8 BOM
+            let line = strip_line(line.trim_start_matches('\u{feff}'));
+            if !line.is_empty() {
+                let prefix = "osu file format v";
+                ensure!(line.starts_with(prefix), "not an osu! beatmap file");
+                let version = parse_as::<i32>(&line[prefix.len()..], "osu format version")?;
+                // According to the osu!lazer source:
+                // BeatmapVersion 4 and lower had an incorrect offset (stable has this set as 24ms off)
+                if version < 5 {
+                    global_offset += 24.;
+                }
+                break;
+            }
+        }
+        let global_offset = global_offset;
+
         let mut errors = Vec::new();
-        let mut line_num = 1;
+        let mut requires_sort = false;
+        let mut last_time = -1. / 0.;
         for line in lines {
             let line = line?;
-            let line = line.trim();
             line_num += 1;
+            let line = strip_line(&line);
             let result = (|| -> Result<()> {
                 let split = |sep: &str| {
                     line.find(sep)
@@ -193,9 +215,14 @@ impl Beatmap {
                         }
                         TimingPoints => {
                             let mut comps = line.split(',');
-                            let time = get_component(&mut comps, "time")?;
+                            let time = get_component::<f64, _>(&mut comps, "time")? + global_offset;
                             let beat_len = get_component(&mut comps, "beatLength")?;
-                            let meter = get_component(&mut comps, "meter")?;
+                            let meter = comps
+                                .next()
+                                .unwrap_or_default()
+                                .trim()
+                                .parse::<i32>()
+                                .unwrap_or(4);
                             bm.timing_points.push(TimingPoint {
                                 time,
                                 beat_len,
@@ -206,10 +233,10 @@ impl Beatmap {
                             let mut comps = line.splitn(6, ',');
                             let x = get_component(&mut comps, "x")?;
                             let y = get_component(&mut comps, "y")?;
-                            let time = get_component(&mut comps, "time")?;
+                            let time = get_component::<f64, _>(&mut comps, "time")? + global_offset;
                             let ty = get_component(&mut comps, "type")?;
                             let _hitsound: String = get_component(&mut comps, "hitsound")?;
-                            let extras = get_component(&mut comps, "extras")?;
+                            let extras = comps.next().unwrap_or_default().trim().to_string();
                             bm.hit_objects.push(HitObject {
                                 x,
                                 y,
@@ -217,6 +244,10 @@ impl Beatmap {
                                 ty,
                                 extras,
                             });
+                            if time < last_time {
+                                requires_sort = true;
+                            }
+                            last_time = time;
                         }
                         Unknown => {}
                     }
@@ -232,6 +263,11 @@ impl Beatmap {
             for (line_num, line, err) in errors.iter() {
                 eprintln!("    line {} (\"{}\"): {:#}", line_num, line, err);
             }
+        }
+        //Turns out hitobjects _can_ be out-of-order, according to the lazer source and actual
+        //ranked beatmaps
+        if requires_sort {
+            bm.hit_objects.sort_by_key(|obj| SortableFloat(obj.time));
         }
         Ok(bm)
     }

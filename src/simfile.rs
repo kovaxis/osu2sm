@@ -187,9 +187,13 @@ impl Simfile {
             println!("    with conflicts resolved: {:?}", order);
         }
         //Reorder charts
+        for chart in self.charts.iter_mut() {
+            chart.difficulty_num = 0. / 0.;
+        }
         for (idx, diff) in order.iter() {
             self.charts[*idx].difficulty_num = *diff;
         }
+        self.charts.retain(|chart| !chart.difficulty_num.is_nan());
         self.charts
             .sort_by_key(|chart| SortableFloat(chart.difficulty_num));
         if debug {
