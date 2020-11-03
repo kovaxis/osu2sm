@@ -111,7 +111,7 @@ pub(crate) fn convert(
         let audio_path = bmset_path.join(&bm.audio);
         let (len, result) = get_audio_len(&audio_path);
         if let Err(err) = result {
-            eprintln!(
+            warn!(
                 "    warning: failed to get full audio length for \"{}\": {:#}",
                 audio_path.display(),
                 err

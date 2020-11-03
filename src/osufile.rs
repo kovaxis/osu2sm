@@ -259,9 +259,9 @@ impl Beatmap {
             }
         }
         if !errors.is_empty() {
-            eprintln!("  warnings parsing \"{}\":", path.display());
+            warn!("  warnings parsing \"{}\":", path.display());
             for (line_num, line, err) in errors.iter() {
-                eprintln!("    line {} (\"{}\"): {:#}", line_num, line, err);
+                warn!("    line {} (\"{}\"): {:#}", line_num, line, err);
             }
         }
         //Turns out hitobjects _can_ be out-of-order, according to the lazer source and actual

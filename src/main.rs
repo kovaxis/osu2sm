@@ -8,6 +8,7 @@ mod prelude {
     };
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
     pub use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+    pub use log::{debug, error, info, trace, warn};
     pub use serde::{Deserialize, Serialize};
     pub use std::{
         cmp,
@@ -18,6 +19,7 @@ mod prelude {
         io::{self, BufRead, BufReader, BufWriter, Read, Write},
         mem, ops,
         path::{Path, PathBuf},
+        time::Instant,
     };
     pub use walkdir::WalkDir;
     pub fn default<T: Default>() -> T {
@@ -55,21 +57,60 @@ mod conv;
 mod osufile;
 mod simfile;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
-enum CopyMethod {
-    Hardlink,
-    Symlink,
-    Copy,
-}
+const OSU_AUTODETECT: BaseDirFinder = BaseDirFinder {
+    base_files: &[
+        "collection.db",
+        "osu!.db",
+        "presence.db",
+        "scores.db",
+        "Replays",
+        "Skins",
+    ],
+    threshold: 4.9 / 6.,
+    default_main_path: "Songs",
+};
+const STEPMANIA_AUTODETECT: BaseDirFinder = BaseDirFinder {
+    base_files: &[
+        "Announcers",
+        "BackgroundEffects",
+        "BackgroundTransitions",
+        "BGAnimations",
+        "Characters",
+        "Courses",
+        "Data",
+        "Docs",
+        "NoteSkins",
+        "Scripts",
+        "Themes",
+    ],
+    threshold: 0.8,
+    default_main_path: "Songs/Osu",
+};
+
+const FILENAME_CHAR_WHITELIST: &str =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789-_";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct Opts {
     /// The input folder to scan.
     input: PathBuf,
+    /// Whether to automatically fix input path using osu! installation folder autodetect.
+    auto_input: bool,
+    /// The osu! base installation folder.
+    /// Will be autodetected if left empty.
+    osu_dir: Option<PathBuf>,
     /// The output folder for converted simfiles.
     output: PathBuf,
+    /// Whether to automatically fix output path using stepmania installation folder autodetect.
+    auto_output: bool,
+    /// The stepmania base installation folder.
+    /// Will be autodetected if left empty.
+    stepmania_dir: Option<PathBuf>,
     /// Whether to output unicode names or use ASCII only.
     unicode: bool,
+    /// Whether to create a simple directory link to the input, and create the `.sm` files in-place.
+    in_place: bool,
     /// How to copy over audio and image files.
     copy: Vec<CopyMethod>,
     /// Whether to ignore incompatible-mode errors (there are too many and they are not terribly
@@ -78,18 +119,41 @@ struct Opts {
     /// How much offset to apply to osu! HitObject and TimingPoint times when converting them
     /// to StepMania simfiles, in milliseconds.
     offset: f64,
+    /// A logspec string (see
+    // https://https://docs.rs/flexi_logger/0.16.1/flexi_logger/struct.LogSpecification.html).
+    log: String,
 }
 impl Default for Opts {
     fn default() -> Opts {
         Opts {
             input: "".into(),
+            auto_input: true,
+            osu_dir: None,
             output: "".into(),
+            auto_output: true,
+            stepmania_dir: None,
             unicode: false,
+            in_place: true,
             copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
-            ignore_mode_errors: false,
+            ignore_mode_errors: true,
             offset: 0.,
+            log: "info".to_string(),
         }
     }
+}
+impl Opts {
+    fn apply(&self) {
+        if let Err(err) = flexi_logger::Logger::with_str(&self.log).start() {
+            eprintln!("error initializing logger: {:#}", err);
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+enum CopyMethod {
+    Hardlink,
+    Symlink,
+    Copy,
 }
 
 struct Ctx {
@@ -106,7 +170,7 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
             for dir in by_depth.drain(depth..) {
                 if !dir.is_empty() {
                     if let Err(e) = on_bmset(entry.path(), &dir[..]) {
-                        eprintln!(
+                        warn!(
                             "  error processing beatmapset at \"{}\": {:#}",
                             entry.path().display(),
                             e
@@ -126,7 +190,7 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
                 if depth > 0 {
                     by_depth[depth - 1].push(bm_path);
                 } else {
-                    eprintln!("do not run on a .osu file, run on the beatmapset folder instead");
+                    warn!("do not run on a .osu file, run on the beatmapset folder instead");
                 }
             }
         }
@@ -141,7 +205,7 @@ fn process_beatmap(ctx: &Ctx, bmset_path: &Path, bm_path: &Path) -> Result<Simfi
 }
 
 fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Result<()> {
-    println!("processing \"{}\":", bmset_path.display());
+    info!("processing \"{}\":", bmset_path.display());
     //Parse and convert beatmaps
     let mut out_sms: Vec<Simfile> = Vec::new();
     for bm_path in bm_paths {
@@ -149,7 +213,7 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         let bm_name = bm_path.file_name().unwrap_or_default().to_string_lossy();
         match result {
             Ok(mut sm) => {
-                println!("  processed beatmap \"{}\" successfully", bm_name);
+                debug!("  processed beatmap \"{}\" successfully", bm_name);
                 let mut merged = false;
                 for out_sm in out_sms.iter_mut() {
                     if (out_sm.title == sm.title || out_sm.title_trans == sm.title_trans)
@@ -168,7 +232,7 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
             }
             Err(err) => {
                 if !ctx.opts.ignore_mode_errors || !err.to_string().contains("mode not supported") {
-                    eprintln!("  error processing beatmap \"{}\": {:#}", bm_name, err);
+                    error!("  error processing beatmap \"{}\": {:#}", bm_name, err);
                 }
             }
         }
@@ -176,12 +240,17 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
     //Write output simfiles
     if !out_sms.is_empty() {
         //Resolve and create base output folder
-        let rel = bmset_path
-            .strip_prefix(&ctx.opts.input)
-            .context("find path relative to base")?;
-        let out_base = ctx.opts.output.join(rel);
-        fs::create_dir_all(&out_base)
-            .with_context(|| anyhow!("create output dir at \"{}\"", out_base.display()))?;
+        let out_base = if ctx.opts.in_place {
+            bmset_path.to_path_buf()
+        } else {
+            let rel = bmset_path
+                .strip_prefix(&ctx.opts.input)
+                .context("find path relative to base")?;
+            let out_base = ctx.opts.output.join(rel);
+            fs::create_dir_all(&out_base)
+                .with_context(|| anyhow!("create output dir at \"{}\"", out_base.display()))?;
+            out_base
+        };
         //Do not copy files twice
         let mut already_copied: HashSet<PathBuf> = HashSet::default();
         for (i, mut sm) in out_sms.into_iter().enumerate() {
@@ -194,7 +263,13 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
             }
             let mut filename = title
                 .chars()
-                .map(|c| if c as u32 >= 128 { '_' } else { c })
+                .map(|c| {
+                    if FILENAME_CHAR_WHITELIST.contains(c) {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect::<String>();
             if i > 0 {
                 write!(filename, "{}", i).unwrap();
@@ -202,26 +277,32 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
             let mut out_path: PathBuf = out_base.join(&filename);
             out_path.set_extension("sm");
             //Write simfile
-            println!("  writing simfile to \"{}\"", out_path.display());
+            debug!("  writing simfile to \"{}\"", out_path.display());
             sm.save(&out_path)
                 .with_context(|| anyhow!("write simfile to \"{}\"", out_path.display()))?;
             //Copy over dependencies (backgrounds, audio, etc...)
-            for dep_name in sm.file_deps() {
-                if !already_copied.contains(dep_name) {
-                    already_copied.insert(dep_name.to_path_buf());
-                    //Make sure no rogue '..' or 'C:\System32' appear
-                    for comp in dep_name.components() {
-                        use std::path::Component;
-                        match comp {
-                            Component::Normal(_) | Component::CurDir => {}
-                            _ => bail!("invalid simfile dependency \"{}\"", dep_name.display()),
+            if !ctx.opts.in_place {
+                for dep_name in sm.file_deps() {
+                    if !already_copied.contains(dep_name) {
+                        already_copied.insert(dep_name.to_path_buf());
+                        //Make sure no rogue '..' or 'C:\System32' appear
+                        for comp in dep_name.components() {
+                            use std::path::Component;
+                            match comp {
+                                Component::Normal(_) | Component::CurDir => {}
+                                _ => bail!("invalid simfile dependency \"{}\"", dep_name.display()),
+                            }
                         }
+                        //Copy the dependency over to the destination folder
+                        let dep_src = bmset_path.join(dep_name);
+                        let dep_dst = out_base.join(dep_name);
+                        let method = copy_with_method(ctx, &dep_src, &dep_dst)?;
+                        info!(
+                            "  copied dependency \"{}\" using {:?}",
+                            dep_name.display(),
+                            method
+                        );
                     }
-                    //Copy the dependency over to the destination folder
-                    println!("  copying file dependency \"{}\"", dep_name.display());
-                    let dep_src = bmset_path.join(dep_name);
-                    let dep_dst = out_base.join(dep_name);
-                    copy_with_method(ctx, &dep_src, &dep_dst)?;
                 }
             }
         }
@@ -229,36 +310,32 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
     Ok(())
 }
 
-fn copy_with_method(ctx: &Ctx, src: &Path, dst: &Path) -> Result<()> {
+fn copy_with_method(ctx: &Ctx, src: &Path, dst: &Path) -> Result<CopyMethod> {
+    debug!("  copying \"{}\" to \"{}\"", src.display(), dst.display());
     let mut errors: Vec<Error> = Vec::new();
     macro_rules! method {
-        ($($code:tt)*) => {{
+        ($method:expr, $($code:tt)*) => {{
             match {$($code)*} {
                 Ok(()) => {
-                    return Ok(());
+                    return Ok($method);
                 }
                 Err(err) => {
+                    debug!("    method {:?} failed: {:#}", $method, err);
                     errors.push(err);
                 }
             }
         }};
     }
-    for method in ctx.opts.copy.iter() {
+    for &method in ctx.opts.copy.iter() {
         match method {
-            CopyMethod::Copy => method! {
-                fs::copy(src, dst).context("failed to do standard copy")?;
-                Ok(())
+            CopyMethod::Copy => method! {method,
+                fs::copy(src, dst).context("failed to do standard copy").map(|_| ())
             },
-            CopyMethod::Hardlink => method! {
-                fs::hard_link(src, dst).context("failed to create hardlink")?;
-                Ok(())
+            CopyMethod::Hardlink => method! {method,
+                fs::hard_link(src, dst).context("failed to create hardlink")
             },
-            CopyMethod::Symlink => method! {
-                #[allow(deprecated)]
-                {
-                    fs::soft_link(src, dst).context("failed to create symlink")?;
-                }
-                Ok(())
+            CopyMethod::Symlink => method! {method,
+                symlink_file(src, dst).context("failed to create symlink")
             },
         }
     }
@@ -274,12 +351,92 @@ fn copy_with_method(ctx: &Ctx, src: &Path, dst: &Path) -> Result<()> {
     bail!(errstr)
 }
 
+fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
+    let result = {
+        #[cfg(target_family = "windows")]
+        {
+            std::os::windows::fs::symlink_file(src, dst)
+        }
+        #[cfg(target_family = "unix")]
+        {
+            std::os::unix::fs::symlink(src, dst)
+        }
+    };
+    if result.is_err() {
+        if let Ok(link_src) = fs::read_link(dst) {
+            if link_src.canonicalize().ok() == src.canonicalize().ok() {
+                //Link already exists
+                trace!(
+                    "  link \"{}\" <- \"{}\" already exists",
+                    src.display(),
+                    dst.display()
+                );
+                return Ok(());
+            }
+        }
+    }
+    result
+}
+
+fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    let result = {
+        #[cfg(target_family = "windows")]
+        {
+            std::os::windows::fs::symlink_dir(src, dst)
+        }
+        #[cfg(target_family = "unix")]
+        {
+            std::os::unix::fs::symlink(src, dst)
+        }
+    };
+    if result.is_err() {
+        if let Ok(link_src) = fs::read_link(dst) {
+            if link_src.canonicalize().ok() == src.canonicalize().ok() {
+                //Link already exists
+                debug!(
+                    "  link \"{}\" <- \"{}\" already exists",
+                    src.display(),
+                    dst.display()
+                );
+                return Ok(());
+            }
+        }
+    }
+    result
+}
+
 fn load_cfg(path: &Path) -> Result<Opts> {
-    ron::de::from_reader(
-        File::open(&path)
-            .with_context(|| anyhow!("failed to read config at \"{}\"", path.display()))?,
-    )
-    .with_context(|| anyhow!("failed to parse config at \"{}\"", path.display()))
+    //Replace all "\" for "\\", and all "\\" for "\", to allow for windows-style paths while still
+    //allowing escapes for advanced users.
+    let mut txt = fs::read_to_string(path)
+        .with_context(|| anyhow!("failed to read config at \"{}\"", path.display()))?;
+    let mut replacements = Vec::new();
+    let mut skip_next_backslash = false;
+    for (idx, _) in txt.match_indices('\\') {
+        if skip_next_backslash {
+            skip_next_backslash = false;
+            continue;
+        }
+        if let Some(next_char) = txt.get(idx + 1..).and_then(|s| s.chars().next()) {
+            if next_char == '\\' {
+                //Convert double backslash to single backslash
+                replacements.push((idx, ""));
+                skip_next_backslash = true;
+            } else {
+                //Duplicate backslash
+                replacements.push((idx, "\\\\"));
+            }
+        }
+    }
+    let mut added_bytes = 0;
+    for (replace_idx, replace_by) in replacements {
+        let replace_idx = (replace_idx as isize + added_bytes) as usize;
+        txt.replace_range(replace_idx..replace_idx + 1, replace_by);
+        added_bytes += replace_by.len() as isize - 1;
+    }
+    //Parse patched string
+    ron::de::from_str(&txt)
+        .with_context(|| anyhow!("failed to parse config at \"{}\"", path.display()))
 }
 
 fn save_cfg(path: &Path, opts: &Opts) -> Result<()> {
@@ -292,22 +449,79 @@ fn save_cfg(path: &Path, opts: &Opts) -> Result<()> {
     Ok(())
 }
 
-fn run() -> Result<()> {
-    let mut override_input = None;
-    let mut load_cfg_from = None;
-    if let Some(input_path) = std::env::args_os().skip(1).next() {
-        //Load config/beatmaps from the given path
-        let input_path: PathBuf = input_path.into();
-        if input_path.is_dir() {
-            override_input = Some(input_path);
-        } else {
-            load_cfg_from = Some(input_path);
+struct BaseDirFinder<'a> {
+    base_files: &'a [&'a str],
+    threshold: f64,
+    default_main_path: &'a str,
+}
+impl BaseDirFinder<'_> {
+    /// Returns a `(base, main)` path tuple.
+    fn find_base(&self, main_path: &Path, should_exist: bool) -> Result<(PathBuf, PathBuf)> {
+        let mut base_path = main_path.to_path_buf();
+        let mut cur_depth = 0;
+        loop {
+            //Check whether this path is the base path
+            let score = self
+                .base_files
+                .iter()
+                .map(|filename| base_path.join(filename).exists() as u8 as f64)
+                .sum::<f64>()
+                / self.base_files.len() as f64;
+            if score >= self.threshold {
+                //Base path!
+                break;
+            } else {
+                //Keep looking
+                if !base_path.pop() {
+                    //Ran out of ancestors
+                    bail!("could not find installation base");
+                }
+                cur_depth += 1;
+            }
         }
+        //Fix up main folder if depth is not correct
+        let default_main_path: &Path = self.default_main_path.as_ref();
+        let main_depth = default_main_path.iter().count();
+        let mut tmp_main = main_path.to_path_buf();
+        if cur_depth < main_depth {
+            //Dig deeper
+            tmp_main.extend(default_main_path.iter().skip(cur_depth));
+            if should_exist && !tmp_main.is_dir() {
+                //Undo the work, this folder does not exist
+                tmp_main = main_path.to_path_buf();
+            }
+        } else if cur_depth > main_depth {
+            //Go higher
+            for _ in main_depth..cur_depth {
+                tmp_main.pop();
+            }
+        }
+        Ok((base_path, tmp_main))
     }
+}
+
+fn read_path_from_stdin() -> Result<PathBuf> {
+    let mut path = String::new();
+    io::stdin().read_line(&mut path).context("read stdin")?;
+    let mut path = path.trim();
+    if (path.starts_with('\'') && path.ends_with('\''))
+        || (path.starts_with('"') && path.ends_with('"'))
+    {
+        path = path[1..path.len() - 1].trim();
+    }
+    Ok(path.into())
+}
+
+fn run() -> Result<()> {
+    let load_cfg_from = std::env::args_os()
+        .skip(1)
+        .next()
+        .map(|path| PathBuf::from(path));
     let mut opts = if let Some(cfg_path) = load_cfg_from {
         //Load from here
         let opts = load_cfg(&cfg_path)?;
-        println!("loaded config from \"{}\"", cfg_path.display());
+        opts.apply();
+        info!("loaded config from \"{}\"", cfg_path.display());
         opts
     } else {
         //Load/save config from default path
@@ -315,29 +529,23 @@ fn run() -> Result<()> {
         cfg_path.set_extension("config.txt");
         match load_cfg(&cfg_path) {
             Ok(opts) => {
-                println!("loaded config from \"{}\"", cfg_path.display());
+                opts.apply();
+                info!("loaded config from \"{}\"", cfg_path.display());
                 opts
             }
             Err(err) => {
-                eprintln!(
-                    "failed to load config from \"{}\": {:#}",
-                    cfg_path.display(),
-                    err
-                );
                 let opts = Opts::default();
+                opts.apply();
+                warn!("failed to load config from default path: {:#}", err);
                 if cfg_path.exists() {
-                    eprintln!("  using defaults");
+                    info!("using default config");
                 } else {
                     match save_cfg(&cfg_path, &opts) {
                         Ok(()) => {
-                            eprintln!("  saved default config file to \"{}\"", cfg_path.display());
+                            info!("saved default config file");
                         }
                         Err(err) => {
-                            eprintln!(
-                                "  failed to save default config to \"{}\": {:#}",
-                                cfg_path.display(),
-                                err
-                            );
+                            warn!("failed to save default config: {:#}", err);
                         }
                     }
                 }
@@ -345,30 +553,80 @@ fn run() -> Result<()> {
             }
         }
     };
-    if let Some(over) = override_input {
-        opts.input = over;
+    if opts.input.as_os_str().is_empty() {
+        eprintln!();
+        eprintln!("drag and drop your osu! song folder into this window, then press enter");
+        opts.input = read_path_from_stdin()?;
     }
-    if opts.output.as_os_str().is_empty() {
-        let mut base_name = opts.input.file_name().unwrap_or_default().to_os_string();
-        base_name.push("Out");
-        let mut out_path = opts.input.clone();
-        let mut i = 0;
-        loop {
-            let mut filename = base_name.clone();
-            if i > 0 {
-                filename.push(format!("{}", i));
+    if opts.auto_input || opts.osu_dir.is_none() {
+        debug!("autodetecting osu! installation");
+        match OSU_AUTODETECT.find_base(&opts.input, true) {
+            Ok((base, main)) => {
+                debug!(
+                    "  determined osu! to be installed at \"{}\"",
+                    base.display()
+                );
+                debug!("  songs dir at \"{}\"", main.display());
+                opts.osu_dir.get_or_insert(base);
+                if opts.auto_input {
+                    info!(
+                        "fixed input path: \"{}\" -> \"{}\"",
+                        opts.input.display(),
+                        main.display()
+                    );
+                    opts.input = main;
+                }
             }
-            i += 1;
-            out_path.set_file_name(filename);
-            if !out_path.exists() {
-                break;
+            Err(err) => {
+                warn!("could not find osu! install dir: {:#}", err);
             }
         }
-        opts.output = out_path;
     }
-    let ctx = Ctx { opts };
-    println!("scanning for beatmaps in \"{}\"", ctx.opts.input.display());
-    println!("outputting simfiles in \"{}\"", ctx.opts.output.display());
+    if opts.output.as_os_str().is_empty() {
+        eprintln!();
+        eprintln!("drag and drop your stepmania song folder into this window, then press enter");
+        opts.output = read_path_from_stdin()?;
+    }
+    if opts.auto_output || opts.stepmania_dir.is_none() {
+        debug!("autodetecting stepmania installation");
+        match STEPMANIA_AUTODETECT.find_base(&opts.output, false) {
+            Ok((base, main)) => {
+                debug!(
+                    "  determined stepmania to be installed at \"{}\"",
+                    base.display()
+                );
+                debug!("  songs dir at \"{}\"", main.display());
+                opts.stepmania_dir.get_or_insert(base);
+                if opts.auto_output {
+                    info!(
+                        "fixed output path: \"{}\" -> \"{}\"",
+                        opts.output.display(),
+                        main.display()
+                    );
+                    opts.output = main;
+                }
+            }
+            Err(err) => {
+                warn!("could not find stepmania install dir: {:#}", err);
+            }
+        }
+    }
+    let mut ctx = Ctx { opts };
+    info!("scanning for beatmaps in \"{}\"", ctx.opts.input.display());
+    info!("outputting simfiles in \"{}\"", ctx.opts.output.display());
+    if ctx.opts.in_place {
+        match symlink_dir(&ctx.opts.input, &ctx.opts.output)
+            .context("failed to create output symlink pointing to input")
+        {
+            Ok(()) => {
+                info!("  enabled in-place conversion");
+            }
+            Err(err) => {
+                ctx.opts.in_place = false;
+                warn!("  disabled in-place conversion: {:#}", err);
+            }
+        }
+    }
     get_songs(&ctx, |bmset, bm_paths| {
         process_beatmapset(&ctx, bmset, bm_paths)
     })?;
@@ -376,10 +634,15 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    let start = Instant::now();
     match run() {
-        Ok(()) => {}
+        Ok(()) => {
+            info!("finished in {}ms", start.elapsed().as_millis());
+        }
         Err(err) => {
-            eprintln!("fatal error: {:#}", err);
+            error!("fatal error: {:#}", err);
         }
     }
+    eprintln!("hit enter to close the program");
+    let _ = std::io::stdin().read_line(&mut String::new());
 }

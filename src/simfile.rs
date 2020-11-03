@@ -142,11 +142,6 @@ impl Simfile {
 
     /// There seems to be a max of 6 difficulties, so use them wisely and sort them.
     pub(crate) fn spread_difficulties(&mut self) -> Result<()> {
-        //I'm not so sure about how robust is this algorithm, so I'll leave this here just in case
-        let debug = false;
-        if debug {
-            println!("  spreading difficulties");
-        }
         //Create an auxiliary vec holding chart indices and difficulties
         let mut order = self
             .charts
@@ -154,14 +149,12 @@ impl Simfile {
             .enumerate()
             .map(|(idx, chart)| (idx, self.difficulty_of(chart)))
             .collect::<Vec<_>>();
-        if debug {
-            println!("    raw difficulties: {:?}", order);
-        }
+        trace!("    raw difficulties: {:?}", order);
+
         //Sort by difficulty
         order.sort_by_key(|(_, d)| SortableFloat(*d));
-        if debug {
-            println!("    sorted difficulties: {:?}", order);
-        }
+        trace!("    sorted difficulties: {:?}", order);
+
         //Remove difficulties, mantaining as much spread as possible
         while order.len() > AVAILABLE_DIFFICULTIES.len() {
             //Find the smallest gap
@@ -183,9 +176,8 @@ impl Simfile {
             //Remove this chart :(
             order.remove(smallest);
         }
-        if debug {
-            println!("    with conflicts resolved: {:?}", order);
-        }
+        trace!("    with conflicts resolved: {:?}", order);
+
         //Reorder charts
         for chart in self.charts.iter_mut() {
             chart.difficulty_num = 0. / 0.;
@@ -196,15 +188,14 @@ impl Simfile {
         self.charts.retain(|chart| !chart.difficulty_num.is_nan());
         self.charts
             .sort_by_key(|chart| SortableFloat(chart.difficulty_num));
-        if debug {
-            println!(
-                "    final chart difficulties: {:?}",
-                self.charts
-                    .iter()
-                    .map(|chart| chart.difficulty_num)
-                    .collect::<Vec<_>>()
-            );
-        }
+        trace!(
+            "    final chart difficulties: {:?}",
+            self.charts
+                .iter()
+                .map(|chart| chart.difficulty_num)
+                .collect::<Vec<_>>()
+        );
+
         //Reassign difficulty names from numbers
         let mut difficulties = self
             .charts
@@ -220,9 +211,8 @@ impl Simfile {
                 diff as isize
             })
             .collect::<Vec<_>>();
-        if debug {
-            println!("    diff indices: {:?}", difficulties);
-        }
+        trace!("    diff indices: {:?}", difficulties);
+
         //Resolve conflicts
         loop {
             let mut conflict = None;
@@ -254,9 +244,7 @@ impl Simfile {
                             cost
                         }
                     };
-                    if debug {
-                        println!("    conflict on {} - {}", i, i + 1);
-                    }
+                    trace!("    conflict on {} - {}", i, i + 1);
                     if direction_cost(i, -1) < direction_cost(i + 1, 1) {
                         //Solve to the left
                         conflict = Some((i, -1));
@@ -267,24 +255,23 @@ impl Simfile {
                     break;
                 }
             }
+
             match conflict {
                 Some((idx, dir)) => {
                     let mut idx = idx as isize;
-                    if debug {
-                        println!("      solving on idx {}, direction {}", idx, dir);
-                    }
+                    trace!("      solving on idx {}, direction {}", idx, dir);
                     let mut set_to = difficulties[idx as usize] + dir;
                     while idx >= 0
                         && idx < difficulties.len() as isize
                         && (difficulties[idx as usize] - set_to) * dir <= 0
                     {
                         set_to = set_to.min(AVAILABLE_DIFFICULTIES.len() as isize - 1).max(0);
-                        if debug {
-                            println!(
-                                "      moving difficulties[{}] == {} -> {}",
-                                idx, difficulties[idx as usize], set_to
-                            );
-                        }
+                        trace!(
+                            "      moving difficulties[{}] == {} -> {}",
+                            idx,
+                            difficulties[idx as usize],
+                            set_to
+                        );
                         difficulties[idx as usize] = set_to;
                         idx += dir;
                         set_to += dir;
@@ -293,26 +280,24 @@ impl Simfile {
                 None => break,
             }
         }
-        if debug {
-            println!(
-                "    diff indices with conflicts resolved: {:?}",
-                difficulties
-            );
-        }
+        trace!(
+            "    diff indices with conflicts resolved: {:?}",
+            difficulties
+        );
+
         //Convert back from difficulty indices to actual difficulties
         for (chart, diff_idx) in self.charts.iter_mut().zip(difficulties) {
             chart.difficulty = AVAILABLE_DIFFICULTIES[diff_idx as usize];
             chart.difficulty_num = chart.difficulty_num.round();
         }
-        if debug {
-            println!(
-                "    final chart difficulties: {:?}",
-                self.charts
-                    .iter()
-                    .map(|chart| format!("{} ({})", chart.difficulty.name(), chart.difficulty_num))
-                    .collect::<Vec<_>>()
-            );
-        }
+        trace!(
+            "    final chart difficulties: {:?}",
+            self.charts
+                .iter()
+                .map(|chart| format!("{} ({})", chart.difficulty.name(), chart.difficulty_num))
+                .collect::<Vec<_>>()
+        );
+
         Ok(())
     }
 
