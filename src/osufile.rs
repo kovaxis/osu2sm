@@ -1,7 +1,7 @@
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]
-pub(crate) struct Beatmap {
+pub struct Beatmap {
     pub audio: String,
     pub preview_start: f64,
     pub mode: i32,
@@ -56,7 +56,7 @@ impl Default for Beatmap {
     }
 }
 impl Beatmap {
-    pub(crate) fn parse(ctx: &Ctx, path: &Path) -> Result<Beatmap> {
+    pub fn parse(offset_ms: f64, path: &Path) -> Result<Beatmap> {
         use Category::*;
 
         #[derive(Copy, Clone, Debug)]
@@ -107,7 +107,7 @@ impl Beatmap {
         let mut line_num = 0;
 
         //Find osu header
-        let mut global_offset = ctx.opts.offset;
+        let mut global_offset = offset_ms;
         for line in &mut lines {
             let line = line?;
             line_num += 1;
@@ -274,14 +274,14 @@ impl Beatmap {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TimingPoint {
+pub struct TimingPoint {
     pub time: f64,
     pub beat_len: f64,
     pub meter: i32,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct HitObject {
+pub struct HitObject {
     pub x: f64,
     pub y: f64,
     pub time: f64,
@@ -289,12 +289,12 @@ pub(crate) struct HitObject {
     pub extras: String,
 }
 
-pub(crate) const MODE_STD: i32 = 0;
-pub(crate) const MODE_TAIKO: i32 = 1;
-pub(crate) const MODE_CATCH: i32 = 2;
-pub(crate) const MODE_MANIA: i32 = 3;
+pub const MODE_STD: i32 = 0;
+pub const MODE_TAIKO: i32 = 1;
+pub const MODE_CATCH: i32 = 2;
+pub const MODE_MANIA: i32 = 3;
 
-pub(crate) const TYPE_HIT: u32 = 1 << 0;
-pub(crate) const TYPE_SLIDER: u32 = 1 << 1;
-pub(crate) const TYPE_SPINNER: u32 = 1 << 3;
-pub(crate) const TYPE_HOLD: u32 = 1 << 7;
+pub const TYPE_HIT: u32 = 1 << 0;
+pub const TYPE_SLIDER: u32 = 1 << 1;
+pub const TYPE_SPINNER: u32 = 1 << 3;
+pub const TYPE_HOLD: u32 = 1 << 7;

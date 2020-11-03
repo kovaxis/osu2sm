@@ -83,13 +83,32 @@ pub(crate) fn convert(
         conv.out_bpms.push((0., beatlen_to_bpm(first_tp.beat_len)));
     }
     // Add hit objects as measure objects, pushing out SM notedata on the fly.
+    let mut pending_tails = Vec::new();
     let mut last_time = -1. / 0.;
     for obj in bm.hit_objects.iter() {
+        //Ensure objects increase monotonically in time
         ensure!(
             obj.time >= last_time,
             "hit object occurs before previous object"
         );
         last_time = obj.time;
+        //Insert any pending long note tails
+        pending_tails.retain(|&(time, key)| {
+            if time <= obj.time {
+                // Insert now
+                let end_beat = get_beat(&mut conv, time);
+                conv.out_notes.push(Note {
+                    kind: '3',
+                    beat: end_beat,
+                    key,
+                });
+                false
+            } else {
+                // Keep waiting
+                true
+            }
+        });
+        //Get data for this object
         let obj_beat = get_beat(&mut conv, obj.time);
         let obj_key = (obj.x * key_count / 512.).floor();
         ensure!(
@@ -98,9 +117,51 @@ pub(crate) fn convert(
             obj.x,
             obj_key
         );
+        let obj_key = obj_key as i32;
+        //Act depending on object type
+        if obj.ty & osufile::TYPE_HOLD != 0 {
+            // Long note
+            // Get the end time in millis
+            let end_time = obj
+                .extras
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .parse::<f64>()
+                .map_err(|_| {
+                    anyhow!(
+                        "invalid hold note extras \"{}\", expected endTime",
+                        obj.extras
+                    )
+                })?;
+            // Leave it for later insertion at the correct time
+            let insert_idx = pending_tails
+                .iter()
+                .position(|(t, _)| *t > end_time)
+                .unwrap_or(pending_tails.len());
+            pending_tails.insert(insert_idx, (end_time, obj_key));
+            // Insert the long note head
+            conv.out_notes.push(Note {
+                kind: '2',
+                beat: obj_beat,
+                key: obj_key,
+            });
+        } else if obj.ty & osufile::TYPE_HIT != 0 {
+            // Hit note
+            conv.out_notes.push(Note {
+                kind: '1',
+                beat: obj_beat,
+                key: obj_key,
+            });
+        }
+    }
+    // Push out any pending long note tails
+    for (time, key) in pending_tails {
+        let end_beat = get_beat(&mut conv, time);
         conv.out_notes.push(Note {
-            beat: obj_beat,
-            key: obj_key as i32,
+            kind: '3',
+            beat: end_beat,
+            key,
         });
     }
     // Generate sample length from audio file
@@ -148,7 +209,8 @@ pub(crate) fn convert(
         sample_start: Some(bm.preview_start / 1000.),
         sample_len: Some(sample_len),
         charts: vec![Chart {
-            gamemode: Gamemode::DanceSingle,
+            gamemode: Gamemode::from_keycount(key_count as i32)
+                .ok_or_else(|| anyhow!("no stepmania gamemode with {} keys", key_count))?,
             desc: bm.version,
             difficulty: Difficulty::Edit,
             difficulty_num: 0.,

@@ -54,8 +54,8 @@ mod prelude {
 }
 
 mod conv;
-mod osufile;
-mod simfile;
+pub mod osufile;
+pub mod simfile;
 
 const OSU_AUTODETECT: BaseDirFinder = BaseDirFinder {
     base_files: &[
@@ -86,9 +86,6 @@ const STEPMANIA_AUTODETECT: BaseDirFinder = BaseDirFinder {
     threshold: 0.8,
     default_main_path: "Songs/Osu",
 };
-
-const FILENAME_CHAR_WHITELIST: &str =
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789-_";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -128,6 +125,9 @@ struct Opts {
     log_stderr: bool,
     /// Enable logging to stdout.
     log_stdout: bool,
+    /// Do a cleanup run before processing beatmaps.
+    /// Removes all `.sm` files from directories with `.osu` files.
+    cleanup: bool,
 }
 impl Default for Opts {
     fn default() -> Opts {
@@ -147,6 +147,7 @@ impl Default for Opts {
             log_file: true,
             log_stderr: true,
             log_stdout: false,
+            cleanup: false,
         }
     }
 }
@@ -229,7 +230,7 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
 }
 
 fn process_beatmap(ctx: &Ctx, bmset_path: &Path, bm_path: &Path) -> Result<Simfile> {
-    let bm = Beatmap::parse(ctx, bm_path).context("read/parse beatmap file")?;
+    let bm = Beatmap::parse(ctx.opts.offset, bm_path).context("read/parse beatmap file")?;
     let sm = conv::convert(ctx, bmset_path, bm_path, bm)?;
     Ok(sm)
 }
@@ -244,20 +245,21 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         match result {
             Ok(mut sm) => {
                 debug!("  processed beatmap \"{}\" successfully", bm_name);
-                let mut merged = false;
-                for out_sm in out_sms.iter_mut() {
-                    if (out_sm.title == sm.title || out_sm.title_trans == sm.title_trans)
-                        && (out_sm.artist == sm.artist || out_sm.artist_trans == sm.artist_trans)
-                        && out_sm.music == sm.music
-                    {
-                        //These two simfiles can be merged
-                        out_sm.charts.append(&mut sm.charts);
-                        merged = true;
-                        break;
+                for chart in mem::replace(&mut sm.charts, Vec::new()) {
+                    let gamemode = chart.gamemode;
+                    let mut chart = Some(chart);
+                    for out_sm in out_sms.iter_mut() {
+                        if out_sm.music == sm.music && out_sm.charts[0].gamemode == gamemode {
+                            //This chart can be merged into this simfile
+                            out_sm.charts.push(chart.take().unwrap());
+                            break;
+                        }
                     }
-                }
-                if !merged {
-                    out_sms.push(sm);
+                    if let Some(chart) = chart {
+                        let mut into_sm = sm.clone();
+                        into_sm.charts.push(chart);
+                        out_sms.push(into_sm);
+                    }
                 }
             }
             Err(err) => {
@@ -267,43 +269,57 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
             }
         }
     }
+    //Resolve output folder
+    let out_base = if ctx.opts.in_place {
+        bmset_path.to_path_buf()
+    } else {
+        let rel = bmset_path
+            .strip_prefix(&ctx.opts.input)
+            .context("find path relative to base")?;
+        ctx.opts.output.join(rel)
+    };
+    //Cleanup output
+    if ctx.opts.cleanup {
+        for file in WalkDir::new(&out_base).min_depth(1).max_depth(1) {
+            let file = match file {
+                Ok(f) => f,
+                Err(err) => {
+                    warn!("  failed to list beatmapset files for cleanup: {:#}", err);
+                    break;
+                }
+            };
+            let filename: &Path = file.file_name().as_ref();
+            if filename.extension() == Some("sm".as_ref()) {
+                if let Err(err) = fs::remove_file(file.path()) {
+                    warn!(
+                        "  failed to remove file \"{}\" while cleaning up: {:#}",
+                        file.path().display(),
+                        err
+                    );
+                }
+            }
+        }
+    }
     //Write output simfiles
     if !out_sms.is_empty() {
-        //Resolve and create base output folder
-        let out_base = if ctx.opts.in_place {
-            bmset_path.to_path_buf()
-        } else {
-            let rel = bmset_path
-                .strip_prefix(&ctx.opts.input)
-                .context("find path relative to base")?;
-            let out_base = ctx.opts.output.join(rel);
+        //Create base output folder
+        if !ctx.opts.in_place {
             fs::create_dir_all(&out_base)
                 .with_context(|| anyhow!("create output dir at \"{}\"", out_base.display()))?;
-            out_base
-        };
+        }
         //Do not copy files twice
         let mut already_copied: HashSet<PathBuf> = HashSet::default();
-        for (i, mut sm) in out_sms.into_iter().enumerate() {
+        let mut gamemode_counts: HashMap<Gamemode, usize> = HashMap::default();
+        for mut sm in out_sms.into_iter() {
             //Solve difficulty conflicts
             sm.spread_difficulties()?;
             //Decide the output filename
-            let mut title = sm.title_trans.clone();
-            if title.is_empty() {
-                title = sm.title.clone();
+            let mut filename = format!("osu2sm-{}", sm.charts[0].gamemode.id());
+            let counter = gamemode_counts.entry(sm.charts[0].gamemode).or_default();
+            if *counter > 0 {
+                write!(filename, "-{}", counter).unwrap();
             }
-            let mut filename = title
-                .chars()
-                .map(|c| {
-                    if FILENAME_CHAR_WHITELIST.contains(c) {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>();
-            if i > 0 {
-                write!(filename, "{}", i).unwrap();
-            }
+            *counter += 1;
             let mut out_path: PathBuf = out_base.join(&filename);
             out_path.set_extension("sm");
             //Write simfile
@@ -661,6 +677,9 @@ fn run() -> Result<()> {
             }
         }
     }
+    if ctx.opts.cleanup {
+        info!("cleanup mode enabled, removing stray `.sm` files");
+    }
     get_songs(&ctx, |bmset, bm_paths| {
         process_beatmapset(&ctx, bmset, bm_paths)
     })?;
@@ -671,7 +690,10 @@ fn main() {
     let start = Instant::now();
     match run() {
         Ok(()) => {
-            info!("finished in {}ms", start.elapsed().as_millis());
+            info!(
+                "finished in {}s",
+                start.elapsed().as_millis() as f64 / 1000.
+            );
         }
         Err(err) => {
             error!("fatal error: {:#}", err);

@@ -9,9 +9,31 @@ const AVAILABLE_DIFFICULTIES: &[Difficulty] = &[
     Difficulty::Challenge,
     Difficulty::Edit,
 ];
+const GAMEMODES_BY_KEYCOUNT: &[Option<Gamemode>] = {
+    use Gamemode::*;
+    &[
+        None,                  //  0K
+        None,                  //  1K
+        None,                  //  2K
+        Some(DanceThreepanel), //  3K
+        Some(DanceSingle),     //  4K
+        Some(PumpSingle),      //  5K
+        Some(DanceSolo),       //  6K
+        Some(Kb7Single),       //  7K
+        Some(DanceDouble),     //  8K
+        Some(PnmNine),         //  9K
+        Some(PumpDouble),      // 10K
+        None,                  // 11K
+        Some(BmDouble5),       // 12K
+        None,                  // 13K
+        None,                  // 14K
+        None,                  // 15K
+        Some(BmDouble7),       // 16K
+    ]
+};
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct Simfile {
+pub struct Simfile {
     pub title: String,
     pub subtitle: String,
     pub artist: String,
@@ -33,7 +55,7 @@ pub(crate) struct Simfile {
     pub charts: Vec<Chart>,
 }
 impl Simfile {
-    pub(crate) fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<()> {
         let mut file = BufWriter::new(File::create(path).context("create file")?);
         fn as_utf8<'a>(path: &'a Option<PathBuf>, name: &str) -> Result<&'a str> {
             path.as_deref()
@@ -130,7 +152,7 @@ impl Simfile {
         Ok(())
     }
 
-    pub(crate) fn file_deps(&self) -> impl Iterator<Item = &Path> {
+    pub fn file_deps(&self) -> impl Iterator<Item = &Path> {
         self.banner
             .as_deref()
             .into_iter()
@@ -141,7 +163,7 @@ impl Simfile {
     }
 
     /// There seems to be a max of 6 difficulties, so use them wisely and sort them.
-    pub(crate) fn spread_difficulties(&mut self) -> Result<()> {
+    pub fn spread_difficulties(&mut self) -> Result<()> {
         //Create an auxiliary vec holding chart indices and difficulties
         let mut order = self
             .charts
@@ -302,7 +324,7 @@ impl Simfile {
     }
 
     /// Get the estimated difficulty of a certain chart.
-    pub(crate) fn difficulty_of(&self, chart: &Chart) -> f64 {
+    pub fn difficulty_of(&self, chart: &Chart) -> f64 {
         fn adapt_range(src: (f64, f64), dst: (f64, f64), val: f64) -> f64 {
             dst.0 + (val - src.0) / (src.1 - src.0) * (dst.1 - dst.0)
         }
@@ -377,7 +399,7 @@ fn write_measure(
             note.key,
             key_count
         );
-        out_measure[idx * key_count as usize + note.key as usize] = b'1';
+        out_measure[idx * key_count as usize + note.key as usize] = note.kind as u8;
     }
     //Convert map into a string
     if measure_idx > 0 {
@@ -434,7 +456,7 @@ fn write_notedata(file: &mut impl Write, chart: &Chart) -> Result<()> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Chart {
+pub struct Chart {
     pub gamemode: Gamemode,
     pub desc: String,
     pub difficulty: Difficulty,
@@ -443,27 +465,199 @@ pub(crate) struct Chart {
     pub notes: Vec<Note>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Gamemode {
+/// From the StepMania source,
+/// [`GameManager.cpp`](https://github.com/stepmania/stepmania/blob/5_1-new/src/GameManager.cpp):
+///
+/// ```
+/// // dance
+/// { "dance-single",	4,	true,	StepsTypeCategory_Single },
+/// { "dance-double",	8,	true,	StepsTypeCategory_Double },
+/// { "dance-couple",	8,	true,	StepsTypeCategory_Couple },
+/// { "dance-solo",		6,	true,	StepsTypeCategory_Single },
+/// { "dance-threepanel",	3,	true,	StepsTypeCategory_Single }, // thanks to kurisu
+/// { "dance-routine",	8,	false,	StepsTypeCategory_Routine },
+/// // pump
+/// { "pump-single",	5,	true,	StepsTypeCategory_Single },
+/// { "pump-halfdouble",	6,	true,	StepsTypeCategory_Double },
+/// { "pump-double",	10,	true,	StepsTypeCategory_Double },
+/// { "pump-couple",	10,	true,	StepsTypeCategory_Couple },
+/// // uh, dance-routine has that one bool as false... wtf? -aj
+/// { "pump-routine",	10,	true,	StepsTypeCategory_Routine },
+/// // kb7
+/// { "kb7-single",		7,	true,	StepsTypeCategory_Single },
+/// // { "kb7-small",		7,	true,	StepsTypeCategory_Single },
+/// // ez2dancer
+/// { "ez2-single",		5,	true,	StepsTypeCategory_Single },	// Single: TL,LHH,D,RHH,TR
+/// { "ez2-double",		10,	true,	StepsTypeCategory_Double },	// Double: Single x2
+/// { "ez2-real",		7,	true,	StepsTypeCategory_Single },	// Real: TL,LHH,LHL,D,RHL,RHH,TR
+/// // parapara paradise
+/// { "para-single",	5,	true,	StepsTypeCategory_Single },
+/// // ds3ddx
+/// { "ds3ddx-single",	8,	true,	StepsTypeCategory_Single },
+/// // beatmania
+/// { "bm-single5",		6,	true,	StepsTypeCategory_Single },	// called "bm" for backward compat
+/// { "bm-versus5",		6,	true,	StepsTypeCategory_Single },	// called "bm" for backward compat
+/// { "bm-double5",		12,	true,	StepsTypeCategory_Double },	// called "bm" for backward compat
+/// { "bm-single7",		8,	true,	StepsTypeCategory_Single },	// called "bm" for backward compat
+/// { "bm-versus7",		8,	true,	StepsTypeCategory_Single },	// called "bm" for backward compat
+/// { "bm-double7",		16,	true,	StepsTypeCategory_Double },	// called "bm" for backward compat
+/// // dance maniax
+/// { "maniax-single",	4,	true,	StepsTypeCategory_Single },
+/// { "maniax-double",	8,	true,	StepsTypeCategory_Double },
+/// // technomotion
+/// { "techno-single4",	4,	true,	StepsTypeCategory_Single },
+/// { "techno-single5",	5,	true,	StepsTypeCategory_Single },
+/// { "techno-single8",	8,	true,	StepsTypeCategory_Single },
+/// { "techno-double4",	8,	true,	StepsTypeCategory_Double },
+/// { "techno-double5",	10,	true,	StepsTypeCategory_Double },
+/// { "techno-double8",	16,	true,	StepsTypeCategory_Double },
+/// // pop'n music
+/// { "pnm-five",		5,	true,	StepsTypeCategory_Single },	// called "pnm" for backward compat
+/// { "pnm-nine",		9,	true,	StepsTypeCategory_Single },	// called "pnm" for backward compat
+/// // cabinet lights and other fine StepsTypes that don't exist lol
+/// { "lights-cabinet",	NUM_CabinetLight,	false,	StepsTypeCategory_Single }, // XXX disable lights autogen for now
+/// // kickbox mania
+/// { "kickbox-human", 4, true, StepsTypeCategory_Single },
+/// { "kickbox-quadarm", 4, true, StepsTypeCategory_Single },
+/// { "kickbox-insect", 6, true, StepsTypeCategory_Single },
+/// { "kickbox-arachnid", 8, true, StepsTypeCategory_Single },
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Gamemode {
     DanceSingle,
+    DanceDouble,
+    DanceCouple,
+    DanceSolo,
+    DanceThreepanel,
+    DanceRoutine,
+    PumpSingle,
+    PumpHalfdouble,
+    PumpDouble,
+    PumpCouple,
+    PumpRoutine,
+    Kb7Single,
+    Ez2Single,
+    Ez2Double,
+    Ez2Real,
+    ParaSingle,
+    Ds3ddxSingle,
+    BmSingle5,
+    BmVersus5,
+    BmDouble5,
+    BmSingle7,
+    BmVersus7,
+    BmDouble7,
+    ManiaxSingle,
+    ManiaxDouble,
+    TechnoSingle4,
+    TechnoSingle5,
+    TechnoSingle8,
+    TechnoDouble4,
+    TechnoDouble5,
+    TechnoDouble8,
+    PnmFive,
+    PnmNine,
+    KickboxHuman,
+    KickboxQuadarm,
+    KickboxInsect,
+    KickboxArachnid,
 }
 impl Gamemode {
+    pub fn from_keycount(key_count: i32) -> Option<Gamemode> {
+        *GAMEMODES_BY_KEYCOUNT
+            .get(key_count as usize)
+            .unwrap_or(&None)
+    }
+
     pub fn key_count(&self) -> i32 {
         use Gamemode::*;
         match self {
             DanceSingle => 4,
+            DanceDouble => 8,
+            DanceCouple => 8,
+            DanceSolo => 6,
+            DanceThreepanel => 3,
+            DanceRoutine => 8,
+            PumpSingle => 5,
+            PumpHalfdouble => 6,
+            PumpDouble => 10,
+            PumpCouple => 10,
+            PumpRoutine => 10,
+            Kb7Single => 7,
+            Ez2Single => 5,
+            Ez2Double => 10,
+            Ez2Real => 7,
+            ParaSingle => 5,
+            Ds3ddxSingle => 8,
+            BmSingle5 => 6,
+            BmVersus5 => 6,
+            BmDouble5 => 12,
+            BmSingle7 => 8,
+            BmVersus7 => 8,
+            BmDouble7 => 16,
+            ManiaxSingle => 4,
+            ManiaxDouble => 8,
+            TechnoSingle4 => 4,
+            TechnoSingle5 => 5,
+            TechnoSingle8 => 8,
+            TechnoDouble4 => 8,
+            TechnoDouble5 => 10,
+            TechnoDouble8 => 16,
+            PnmFive => 5,
+            PnmNine => 9,
+            KickboxHuman => 4,
+            KickboxQuadarm => 4,
+            KickboxInsect => 6,
+            KickboxArachnid => 8,
         }
     }
 
     pub fn id(&self) -> &'static str {
+        use Gamemode::*;
         match self {
-            Gamemode::DanceSingle => "dance-single",
+            DanceSingle => "dance-single",
+            DanceDouble => "dance-double",
+            DanceCouple => "dance-couple",
+            DanceSolo => "dance-solo",
+            DanceThreepanel => "dance-threepanel",
+            DanceRoutine => "dance-routine",
+            PumpSingle => "pump-single",
+            PumpHalfdouble => "pump-halfdouble",
+            PumpDouble => "pump-double",
+            PumpCouple => "pump-couple",
+            PumpRoutine => "pump-routine",
+            Kb7Single => "kb7-single",
+            Ez2Single => "ez2-single",
+            Ez2Double => "ez2-double",
+            Ez2Real => "ez2-real",
+            ParaSingle => "para-single",
+            Ds3ddxSingle => "ds3ddx-single",
+            BmSingle5 => "bm-single5",
+            BmVersus5 => "bm-versus5",
+            BmDouble5 => "bm-double5",
+            BmSingle7 => "bm-single7",
+            BmVersus7 => "bm-versus7",
+            BmDouble7 => "bm-double7",
+            ManiaxSingle => "maniax-single",
+            ManiaxDouble => "maniax-double",
+            TechnoSingle4 => "techno-single4",
+            TechnoSingle5 => "techno-single5",
+            TechnoSingle8 => "techno-single8",
+            TechnoDouble4 => "techno-double4",
+            TechnoDouble5 => "techno-double5",
+            TechnoDouble8 => "techno-double8",
+            PnmFive => "pnm-five",
+            PnmNine => "pnm-nine",
+            KickboxHuman => "kickbox-human",
+            KickboxQuadarm => "kickbox-quadarm",
+            KickboxInsect => "kickbox-insect",
+            KickboxArachnid => "kickbox-arachnid",
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Difficulty {
+pub enum Difficulty {
     Beginner,
     Easy,
     Medium,
@@ -499,7 +693,7 @@ impl Difficulty {
 
 /// Represents an absolute position in beats, where 0 is the first beat of the song.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct BeatPos {
+pub struct BeatPos {
     frac: i32,
 }
 impl BeatPos {
@@ -536,7 +730,8 @@ impl fmt::Display for BeatPos {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Note {
+pub struct Note {
+    pub kind: char,
     pub beat: BeatPos,
     pub key: i32,
 }
