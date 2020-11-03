@@ -8,3 +8,6 @@ edition = "2018"
 anyhow = "1"
 walkdir = "2"
 fxhash = "0.2"
+ron = "0.6"
+serde = { version = "1", features = ["derive"] }
+mp3-duration = "0.1"

@@ -2,13 +2,16 @@ use crate::prelude::*;
 
 mod prelude {
     pub(crate) use crate::{
-        osufile::{self, Beatmap, HitObject, TimingPoint},
-        simfile::{Chart, Simfile},
+        osufile::{self, Beatmap, TimingPoint},
+        simfile::{BeatPos, Chart, Difficulty, Gamemode, Note, Simfile},
         Ctx,
     };
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
     pub use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+    pub use serde::{Deserialize, Serialize};
     pub use std::{
+        cmp,
+        convert::{TryFrom, TryInto},
         ffi::{OsStr, OsString},
         fmt::{self, Write as _},
         fs::{self, File},
@@ -20,20 +23,78 @@ mod prelude {
     pub fn default<T: Default>() -> T {
         T::default()
     }
+    #[derive(Debug, Clone, Copy)]
+    pub struct SortableFloat(pub f64);
+    impl Ord for SortableFloat {
+        fn cmp(&self, rhs: &Self) -> cmp::Ordering {
+            self.0.partial_cmp(&rhs.0).unwrap_or_else(|| {
+                if self.0.is_nan() == rhs.0.is_nan() {
+                    cmp::Ordering::Equal
+                } else if self.0.is_nan() {
+                    cmp::Ordering::Less
+                } else {
+                    cmp::Ordering::Greater
+                }
+            })
+        }
+    }
+    impl PartialOrd for SortableFloat {
+        fn partial_cmp(&self, rhs: &Self) -> Option<cmp::Ordering> {
+            Some(self.cmp(rhs))
+        }
+    }
+    impl PartialEq for SortableFloat {
+        fn eq(&self, rhs: &Self) -> bool {
+            self.cmp(rhs) == cmp::Ordering::Equal
+        }
+    }
+    impl Eq for SortableFloat {}
 }
 
 mod conv;
 mod osufile;
 mod simfile;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+enum CopyMethod {
+    Hardlink,
+    Symlink,
+    Copy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Opts {
+    /// The input folder to scan.
+    input: PathBuf,
+    /// The output folder for converted simfiles.
+    output: PathBuf,
+    /// Whether to output unicode names or use ASCII only.
+    unicode: bool,
+    /// How to copy over audio and image files.
+    copy: Vec<CopyMethod>,
+    /// Whether to ignore incompatible-mode errors (there are too many and they are not terribly
+    /// useful).
+    ignore_mode_errors: bool,
+}
+impl Default for Opts {
+    fn default() -> Opts {
+        Opts {
+            input: "".into(),
+            output: "".into(),
+            unicode: false,
+            copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
+            ignore_mode_errors: false,
+        }
+    }
+}
+
 struct Ctx {
-    base: PathBuf,
-    out: PathBuf,
+    opts: Opts,
 }
 
 fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()>) -> Result<()> {
     let mut by_depth: Vec<Vec<PathBuf>> = Vec::new();
-    for entry in WalkDir::new(&ctx.base).contents_first(true) {
+    for entry in WalkDir::new(&ctx.opts.input).contents_first(true) {
         let entry = entry?;
         let depth = entry.depth();
         if depth < by_depth.len() {
@@ -105,43 +166,139 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         }
     }
     //Write output simfiles
-    let rel = bmset_path
-        .strip_prefix(&ctx.base)
-        .context("find path relative to base")?;
-    let out_base = ctx.out.join(rel);
-    fs::create_dir_all(&out_base)
-        .with_context(|| anyhow!("create output dir at \"{}\"", out_base.display()))?;
-    for (i, sm) in out_sms.into_iter().enumerate() {
-        let mut title = sm.title_trans.clone();
-        if title.is_empty() {
-            title = sm.title.clone();
+    if !out_sms.is_empty() {
+        //Resolve and create base output folder
+        let rel = bmset_path
+            .strip_prefix(&ctx.opts.input)
+            .context("find path relative to base")?;
+        let out_base = ctx.opts.output.join(rel);
+        fs::create_dir_all(&out_base)
+            .with_context(|| anyhow!("create output dir at \"{}\"", out_base.display()))?;
+        //Do not copy files twice
+        let mut already_copied: HashSet<PathBuf> = HashSet::default();
+        for (i, mut sm) in out_sms.into_iter().enumerate() {
+            //Solve difficulty conflicts
+            sm.spread_difficulties()?;
+            //Decide the output filename
+            let mut title = sm.title_trans.clone();
+            if title.is_empty() {
+                title = sm.title.clone();
+            }
+            let mut filename = title
+                .chars()
+                .map(|c| if c as u32 >= 128 { '_' } else { c })
+                .collect::<String>();
+            if i > 0 {
+                write!(filename, "{}", i).unwrap();
+            }
+            let mut out_path: PathBuf = out_base.join(&filename);
+            out_path.set_extension("sm");
+            //Write simfile
+            println!("  writing simfile to \"{}\"", out_path.display());
+            sm.save(&out_path)
+                .with_context(|| anyhow!("write simfile to \"{}\"", out_path.display()))?;
+            //Copy over dependencies (backgrounds, audio, etc...)
+            for dep_name in sm.file_deps() {
+                if !already_copied.contains(dep_name) {
+                    already_copied.insert(dep_name.to_path_buf());
+                    //Make sure no rogue '..' or 'C:\System32' appear
+                    for comp in dep_name.components() {
+                        use std::path::Component;
+                        match comp {
+                            Component::Normal(_) | Component::CurDir => {}
+                            _ => bail!("invalid simfile dependency \"{}\"", dep_name.display()),
+                        }
+                    }
+                    //Copy the dependency over to the destination folder
+                    println!("  copying file dependency \"{}\"", dep_name.display());
+                    let dep_src = bmset_path.join(dep_name);
+                    let dep_dst = out_base.join(dep_name);
+                    fs::hard_link(&dep_src, &dep_dst).context("failed to create hardlink")?;
+                }
+            }
         }
-        let mut filename = title
-            .chars()
-            .map(|c| if c as u32 >= 128 { '_' } else { c })
-            .collect::<String>();
-        if i > 0 {
-            write!(filename, "{}", i).unwrap();
-        }
-        let mut out_path: PathBuf = out_base.join(&filename);
-        out_path.set_extension("sm");
-        println!("  writing simfile to \"{}\"", out_path.display());
-        sm.save(&out_path)
-            .with_context(|| anyhow!("write simfile to \"{}\"", out_path.display()))?;
     }
     Ok(())
 }
 
+fn load_cfg(path: &Path) -> Result<Opts> {
+    ron::de::from_reader(
+        File::open(&path)
+            .with_context(|| anyhow!("failed to read config at \"{}\"", path.display()))?,
+    )
+    .with_context(|| anyhow!("failed to parse config at \"{}\"", path.display()))
+}
+
+fn save_cfg(path: &Path, opts: &Opts) -> Result<()> {
+    ron::ser::to_writer_pretty(
+        BufWriter::new(File::create(&path).with_context(|| anyhow!("failed to create file"))?),
+        opts,
+        default(),
+    )
+    .context("failed to serialize")?;
+    Ok(())
+}
+
 fn run() -> Result<()> {
-    let input_path: PathBuf = std::env::args_os()
-        .skip(1)
-        .next()
-        .ok_or(anyhow!("expected input path"))?
-        .into();
-    let output_path = {
-        let mut base_name = input_path.file_name().unwrap_or_default().to_os_string();
+    let mut override_input = None;
+    let mut load_cfg_from = None;
+    if let Some(input_path) = std::env::args_os().skip(1).next() {
+        //Load config/beatmaps from the given path
+        let input_path: PathBuf = input_path.into();
+        if input_path.is_dir() {
+            override_input = Some(input_path);
+        } else {
+            load_cfg_from = Some(input_path);
+        }
+    }
+    let mut opts = if let Some(cfg_path) = load_cfg_from {
+        //Load from here
+        let opts = load_cfg(&cfg_path)?;
+        println!("loaded config from \"{}\"", cfg_path.display());
+        opts
+    } else {
+        //Load/save config from default path
+        let mut cfg_path = std::env::current_exe().unwrap_or_default();
+        cfg_path.set_extension("config.txt");
+        match load_cfg(&cfg_path) {
+            Ok(opts) => {
+                println!("loaded config from \"{}\"", cfg_path.display());
+                opts
+            }
+            Err(err) => {
+                eprintln!(
+                    "failed to load config from \"{}\": {:#}",
+                    cfg_path.display(),
+                    err
+                );
+                let opts = Opts::default();
+                if cfg_path.exists() {
+                    eprintln!("  using defaults");
+                } else {
+                    match save_cfg(&cfg_path, &opts) {
+                        Ok(()) => {
+                            eprintln!("  saved default config file to \"{}\"", cfg_path.display());
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "  failed to save default config to \"{}\": {:#}",
+                                cfg_path.display(),
+                                err
+                            );
+                        }
+                    }
+                }
+                opts
+            }
+        }
+    };
+    if let Some(over) = override_input {
+        opts.input = over;
+    }
+    if opts.output.as_os_str().is_empty() {
+        let mut base_name = opts.input.file_name().unwrap_or_default().to_os_string();
         base_name.push("Out");
-        let mut out_path = input_path.clone();
+        let mut out_path = opts.input.clone();
         let mut i = 0;
         loop {
             let mut filename = base_name.clone();
@@ -154,14 +311,11 @@ fn run() -> Result<()> {
                 break;
             }
         }
-        out_path
-    };
-    let ctx = Ctx {
-        base: input_path,
-        out: output_path,
-    };
-    println!("scanning for beatmaps in \"{}\"", ctx.base.display());
-    println!("outputting simfiles in \"{}\"", ctx.out.display());
+        opts.output = out_path;
+    }
+    let ctx = Ctx { opts };
+    println!("scanning for beatmaps in \"{}\"", ctx.opts.input.display());
+    println!("outputting simfiles in \"{}\"", ctx.opts.output.display());
     get_songs(&ctx, |bmset, bm_paths| {
         process_beatmapset(&ctx, bmset, bm_paths)
     })?;

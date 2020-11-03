@@ -86,7 +86,15 @@ impl Beatmap {
             s.parse::<T>()
                 .map_err(|_| anyhow!("invalid {} \"{}\"", name, s))
         }
-        fn get_component<'a, T: std::str::FromStr + 'a, I: Iterator<Item = &'a str>>(
+        fn parse_filename(path: &str) -> String {
+            if path.starts_with('"') && path.ends_with('"') {
+                &path[1..path.len() - 1]
+            } else {
+                path
+            }
+            .to_string()
+        }
+        fn get_component<'a, T: std::str::FromStr, I: Iterator<Item = &'a str>>(
             iter: &mut I,
             name: &str,
         ) -> Result<T> {
@@ -125,7 +133,7 @@ impl Beatmap {
                         General => {
                             if let Some((k, v)) = split(":") {
                                 match k {
-                                    "AudioFilename" => bm.audio = v.to_string(),
+                                    "AudioFilename" => bm.audio = parse_filename(v),
                                     "PreviewTime" => {
                                         bm.preview_start = parse_as::<f64>(v, "PreviewTime")?
                                     }
@@ -178,7 +186,7 @@ impl Beatmap {
                                     let _start_time: String =
                                         get_component(&mut comps, "start time")?;
                                     let filename: String = get_component(&mut comps, "filename")?;
-                                    bm.background = filename;
+                                    bm.background = parse_filename(&filename);
                                 }
                                 _ => {}
                             }
