@@ -2,9 +2,13 @@
 
 # Planned changes
 
-- Allow (maybe configurable) filters.
 - Use difficulties from `osu!.db`.
 - Use `.ssc` instead of `.sm`.
 - Convert standard, and perhaps taiko and ctb.
-- Convert between keycounts.
-- Output a single `.sm` per audio, otherwise they override each other.
+- Make sure video has priority over background.
+- Enable/disable video.
+- Only show "fixed path..." message if path actually changes.
+- Random deny filter (for the debug purposes of trimming down input size).
+- Max simultaneous keys filter.
+- Difficulty cutter filter.
+- Cache mp3 audio length query.

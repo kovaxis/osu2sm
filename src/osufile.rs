@@ -1,3 +1,5 @@
+//! Parse and handle osu! beatmaps.
+
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]

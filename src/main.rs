@@ -2,13 +2,19 @@ use crate::prelude::*;
 
 mod prelude {
     pub(crate) use crate::{
+        filter::Filter,
         osufile::{self, Beatmap, TimingPoint},
-        simfile::{BeatPos, Chart, Difficulty, Gamemode, Note, Simfile},
+        simfile::{BeatPos, ControlPoint, Difficulty, Gamemode, Note, Simfile, ToTime},
         Ctx,
     };
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
     pub use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
     pub use log::{debug, error, info, trace, warn};
+    pub use rand::{
+        seq::{IteratorRandom, SliceRandom},
+        Rng, RngCore, SeedableRng,
+    };
+    pub use rand_xoshiro::Xoshiro256Plus as FastRng;
     pub use serde::{Deserialize, Serialize};
     pub use std::{
         cmp,
@@ -17,10 +23,11 @@ mod prelude {
         fmt::{self, Write as _},
         fs::{self, File},
         io::{self, BufRead, BufReader, BufWriter, Read, Write},
-        mem, ops,
+        iter, mem, ops,
         path::{Path, PathBuf},
         time::Instant,
     };
+    pub type SimfileList = Vec<Box<Simfile>>;
     pub use walkdir::WalkDir;
     pub fn default<T: Default>() -> T {
         T::default()
@@ -54,6 +61,7 @@ mod prelude {
 }
 
 mod conv;
+pub mod filter;
 pub mod osufile;
 pub mod simfile;
 
@@ -93,17 +101,21 @@ struct Opts {
     /// The input folder to scan.
     input: PathBuf,
     /// Whether to automatically fix input path using osu! installation folder autodetect.
-    auto_input: bool,
+    fix_input: bool,
     /// The osu! base installation folder.
     /// Will be autodetected if left empty.
     osu_dir: Option<PathBuf>,
     /// The output folder for converted simfiles.
     output: PathBuf,
     /// Whether to automatically fix output path using stepmania installation folder autodetect.
-    auto_output: bool,
+    fix_output: bool,
     /// The stepmania base installation folder.
     /// Will be autodetected if left empty.
     stepmania_dir: Option<PathBuf>,
+    /// What gamemodes (keycounts) to convert compatible-keycount maps into.
+    gamemodes: Vec<Gamemode>,
+    /// Transformations to apply to converted simfiles before saving.
+    filters: Vec<Filter>,
     /// Whether to output unicode names or use ASCII only.
     unicode: bool,
     /// Whether to create a simple directory link to the input, and create the `.sm` files in-place.
@@ -125,6 +137,10 @@ struct Opts {
     log_stderr: bool,
     /// Enable logging to stdout.
     log_stdout: bool,
+    /// Query the length of the audio files in order to create an accurate preview range.
+    /// However, querying the length of an audio file can take quite some time, so disable for
+    /// speed.
+    query_audio_len: bool,
     /// Do a cleanup run before processing beatmaps.
     /// Removes all `.sm` files from directories with `.osu` files.
     cleanup: bool,
@@ -133,11 +149,34 @@ impl Default for Opts {
     fn default() -> Opts {
         Opts {
             input: "".into(),
-            auto_input: true,
+            fix_input: true,
             osu_dir: None,
             output: "".into(),
-            auto_output: true,
+            fix_output: true,
             stepmania_dir: None,
+            gamemodes: {
+                use crate::simfile::Gamemode::*;
+                // Supported: 3K - 9K
+                vec![
+                    DanceThreepanel,
+                    DanceSingle,
+                    DanceSolo,
+                    DanceDouble,
+                    PumpSingle,
+                    PumpHalfdouble,
+                    PumpDouble,
+                    Kb7Single,
+                    PnmFive,
+                    PnmNine,
+                ]
+            },
+            filters: vec![
+                Filter::ConvertTo(filter::ConvertTo {
+                    into: vec![Gamemode::DanceSingle],
+                    keep_original: false,
+                }),
+                Filter::Whitelist(vec![Gamemode::DanceSingle]),
+            ],
             unicode: false,
             in_place: true,
             copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
@@ -147,6 +186,7 @@ impl Default for Opts {
             log_file: true,
             log_stderr: true,
             log_stdout: false,
+            query_audio_len: true,
             cleanup: false,
         }
     }
@@ -229,7 +269,7 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
     Ok(())
 }
 
-fn process_beatmap(ctx: &Ctx, bmset_path: &Path, bm_path: &Path) -> Result<Simfile> {
+fn process_beatmap<'a>(ctx: &'a Ctx, bmset_path: &Path, bm_path: &Path) -> Result<SimfileList> {
     let bm = Beatmap::parse(ctx.opts.offset, bm_path).context("read/parse beatmap file")?;
     let sm = conv::convert(ctx, bmset_path, bm_path, bm)?;
     Ok(sm)
@@ -238,28 +278,51 @@ fn process_beatmap(ctx: &Ctx, bmset_path: &Path, bm_path: &Path) -> Result<Simfi
 fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Result<()> {
     info!("processing \"{}\":", bmset_path.display());
     //Parse and convert beatmaps
-    let mut out_sms: Vec<Simfile> = Vec::new();
+    let mut by_music: HashMap<PathBuf, HashMap<Gamemode, Vec<Box<Simfile>>>> = HashMap::default();
+    let mut total_sms = 0;
     for bm_path in bm_paths {
         let result = process_beatmap(ctx, bmset_path, bm_path);
         let bm_name = bm_path.file_name().unwrap_or_default().to_string_lossy();
         match result {
-            Ok(mut sm) => {
-                debug!("  processed beatmap \"{}\" successfully", bm_name);
-                for chart in mem::replace(&mut sm.charts, Vec::new()) {
-                    let gamemode = chart.gamemode;
-                    let mut chart = Some(chart);
-                    for out_sm in out_sms.iter_mut() {
-                        if out_sm.music == sm.music && out_sm.charts[0].gamemode == gamemode {
-                            //This chart can be merged into this simfile
-                            out_sm.charts.push(chart.take().unwrap());
-                            break;
+            Ok(sms) => {
+                debug!(
+                    "  loaded beatmap \"{}\" successfully into {} simfiles",
+                    bm_name,
+                    sms.len()
+                );
+                //Apply filters
+                let mut sms = sms;
+                let mut out_sms = Vec::new();
+                trace!("  applying {} filters", ctx.opts.filters.len());
+                for filter in ctx.opts.filters.iter() {
+                    for mut sm in sms.drain(..) {
+                        match filter.apply(&mut *sm) {
+                            Ok((keep, append)) => {
+                                if keep {
+                                    out_sms.push(sm);
+                                }
+                                out_sms.extend(append);
+                            }
+                            Err(err) => {
+                                error!(
+                                    "  filter {:?} failed to process simfile: {:?}",
+                                    filter, err
+                                );
+                                out_sms.push(sm);
+                            }
                         }
                     }
-                    if let Some(chart) = chart {
-                        let mut into_sm = sm.clone();
-                        into_sm.charts.push(chart);
-                        out_sms.push(into_sm);
-                    }
+                    mem::swap(&mut sms, &mut out_sms);
+                    trace!("    filter {:?} resulted in {} simfiles", filter, sms.len());
+                }
+                //Add simfiles to simfile stash
+                for sm in sms {
+                    let by_gamemode = by_music
+                        .entry(sm.music.clone().unwrap_or_default())
+                        .or_default();
+                    let simfiles = by_gamemode.entry(sm.gamemode).or_default();
+                    simfiles.push(sm);
+                    total_sms += 1;
                 }
             }
             Err(err) => {
@@ -301,7 +364,7 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         }
     }
     //Write output simfiles
-    if !out_sms.is_empty() {
+    if total_sms > 0 {
         //Create base output folder
         if !ctx.opts.in_place {
             fs::create_dir_all(&out_base)
@@ -309,27 +372,36 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         }
         //Do not copy files twice
         let mut already_copied: HashSet<PathBuf> = HashSet::default();
-        let mut gamemode_counts: HashMap<Gamemode, usize> = HashMap::default();
-        for mut sm in out_sms.into_iter() {
-            //Solve difficulty conflicts
-            sm.spread_difficulties()?;
-            //Decide the output filename
-            let mut filename = format!("osu2sm-{}", sm.charts[0].gamemode.id());
-            let counter = gamemode_counts.entry(sm.charts[0].gamemode).or_default();
-            if *counter > 0 {
-                write!(filename, "-{}", counter).unwrap();
+        for (audio_name, mut by_gamemode) in by_music.into_iter() {
+            //Solve difficulty conflicts to flatten everything into one large simfile array
+            for (_gamemode, sms) in by_gamemode.iter_mut() {
+                Simfile::spread_difficulties(sms)?;
             }
-            *counter += 1;
-            let mut out_path: PathBuf = out_base.join(&filename);
-            out_path.set_extension("sm");
+            let mut flat_simfiles: Vec<Simfile> = by_gamemode
+                .into_iter()
+                .flat_map(|(_gamemode, sms)| sms.into_iter().map(|boxed| *boxed))
+                .collect();
+            //Decide the output filename
+            let filename = format!(
+                "osu2sm-{}.sm",
+                audio_name.file_stem().unwrap_or_default().to_string_lossy()
+            );
+            let out_path: PathBuf = out_base.join(&filename);
+            //Fix simfiles before writing
+            for sm in flat_simfiles.iter_mut() {
+                sm.fix()?;
+            }
             //Write simfile
             debug!("  writing simfile to \"{}\"", out_path.display());
-            sm.save(&out_path)
+            Simfile::save(&out_path, &flat_simfiles)
                 .with_context(|| anyhow!("write simfile to \"{}\"", out_path.display()))?;
             //Copy over dependencies (backgrounds, audio, etc...)
             if !ctx.opts.in_place {
-                for dep_name in sm.file_deps() {
-                    if !already_copied.contains(dep_name) {
+                for sm in flat_simfiles.iter() {
+                    for dep_name in sm.file_deps() {
+                        if already_copied.contains(dep_name) {
+                            continue;
+                        }
                         already_copied.insert(dep_name.to_path_buf());
                         //Make sure no rogue '..' or 'C:\System32' appear
                         for comp in dep_name.components() {
@@ -608,7 +680,7 @@ fn run() -> Result<()> {
         eprintln!("drag and drop your osu! song folder into this window, then press enter");
         opts.input = read_path_from_stdin()?;
     }
-    if opts.auto_input || opts.osu_dir.is_none() {
+    if opts.fix_input || opts.osu_dir.is_none() {
         debug!("autodetecting osu! installation");
         match OSU_AUTODETECT.find_base(&opts.input, true) {
             Ok((base, main)) => {
@@ -618,7 +690,7 @@ fn run() -> Result<()> {
                 );
                 debug!("  songs dir at \"{}\"", main.display());
                 opts.osu_dir.get_or_insert(base);
-                if opts.auto_input {
+                if opts.fix_input {
                     info!(
                         "fixed input path: \"{}\" -> \"{}\"",
                         opts.input.display(),
@@ -637,7 +709,7 @@ fn run() -> Result<()> {
         eprintln!("drag and drop your stepmania song folder into this window, then press enter");
         opts.output = read_path_from_stdin()?;
     }
-    if opts.auto_output || opts.stepmania_dir.is_none() {
+    if opts.fix_output || opts.stepmania_dir.is_none() {
         debug!("autodetecting stepmania installation");
         match STEPMANIA_AUTODETECT.find_base(&opts.output, false) {
             Ok((base, main)) => {
@@ -647,7 +719,7 @@ fn run() -> Result<()> {
                 );
                 debug!("  songs dir at \"{}\"", main.display());
                 opts.stepmania_dir.get_or_insert(base);
-                if opts.auto_output {
+                if opts.fix_output {
                     info!(
                         "fixed output path: \"{}\" -> \"{}\"",
                         opts.output.display(),

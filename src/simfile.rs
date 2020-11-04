@@ -1,3 +1,5 @@
+//! Create and write stepmania simfiles.
+
 use crate::prelude::*;
 
 const BEATS_IN_MEASURE: i32 = 4;
@@ -9,30 +11,8 @@ const AVAILABLE_DIFFICULTIES: &[Difficulty] = &[
     Difficulty::Challenge,
     Difficulty::Edit,
 ];
-const GAMEMODES_BY_KEYCOUNT: &[Option<Gamemode>] = {
-    use Gamemode::*;
-    &[
-        None,                  //  0K
-        None,                  //  1K
-        None,                  //  2K
-        Some(DanceThreepanel), //  3K
-        Some(DanceSingle),     //  4K
-        Some(PumpSingle),      //  5K
-        Some(DanceSolo),       //  6K
-        Some(Kb7Single),       //  7K
-        Some(DanceDouble),     //  8K
-        Some(PnmNine),         //  9K
-        Some(PumpDouble),      // 10K
-        None,                  // 11K
-        Some(BmDouble5),       // 12K
-        None,                  // 13K
-        None,                  // 14K
-        None,                  // 15K
-        Some(BmDouble7),       // 16K
-    ]
-};
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Simfile {
     pub title: String,
     pub subtitle: String,
@@ -48,14 +28,21 @@ pub struct Simfile {
     pub cdtitle: Option<PathBuf>,
     pub music: Option<PathBuf>,
     pub offset: f64,
-    pub bpms: Vec<(f64, f64)>,
+    pub bpms: Vec<ControlPoint>,
     pub stops: Vec<(f64, f64)>,
     pub sample_start: Option<f64>,
     pub sample_len: Option<f64>,
-    pub charts: Vec<Chart>,
+    pub gamemode: Gamemode,
+    pub desc: String,
+    pub difficulty: Difficulty,
+    pub difficulty_num: f64,
+    pub radar: [f64; 5],
+    pub notes: Vec<Note>,
 }
 impl Simfile {
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(path: &Path, simfiles: &[Simfile]) -> Result<()> {
+        ensure!(!simfiles.is_empty(), "zero simfiles supplied");
+        let main_sm = &simfiles[0];
         let mut file = BufWriter::new(File::create(path).context("create file")?);
         fn as_utf8<'a>(path: &'a Option<PathBuf>, name: &str) -> Result<&'a str> {
             path.as_deref()
@@ -90,43 +77,43 @@ impl Simfile {
 #KEYSOUNDS:;
 #ATTACKS:;
 "#,
-            title = self.title,
-            subtitle = self.subtitle,
-            artist = self.artist,
-            title_t = self.title_trans,
-            subtitle_t = self.subtitle_trans,
-            artist_t = self.artist_trans,
-            genre = self.genre,
-            credit = self.credit,
-            banner = as_utf8(&self.banner, "BANNER")?,
-            bg = as_utf8(&self.background, "BACKGROUND")?,
-            lyrics = as_utf8(&self.lyrics, "LYRICSPATH")?,
-            cdtitle = as_utf8(&self.cdtitle, "CDTITLE")?,
-            music = as_utf8(&self.music, "MUSIC")?,
-            offset = self.offset,
-            sample_start = self
+            title = main_sm.title,
+            subtitle = main_sm.subtitle,
+            artist = main_sm.artist,
+            title_t = main_sm.title_trans,
+            subtitle_t = main_sm.subtitle_trans,
+            artist_t = main_sm.artist_trans,
+            genre = main_sm.genre,
+            credit = main_sm.credit,
+            banner = as_utf8(&main_sm.banner, "BANNER")?,
+            bg = as_utf8(&main_sm.background, "BACKGROUND")?,
+            lyrics = as_utf8(&main_sm.lyrics, "LYRICSPATH")?,
+            cdtitle = as_utf8(&main_sm.cdtitle, "CDTITLE")?,
+            music = as_utf8(&main_sm.music, "MUSIC")?,
+            offset = main_sm.offset,
+            sample_start = main_sm
                 .sample_start
                 .map(|s| format!("{}", s))
                 .unwrap_or_else(String::new),
-            sample_len = self
+            sample_len = main_sm
                 .sample_len
                 .map(|l| format!("{}", l))
                 .unwrap_or_else(String::new),
             bpms = {
                 let mut bpms = String::new();
                 let mut first = true;
-                for (beat, bpm) in self.bpms.iter() {
+                for point in main_sm.bpms.iter() {
                     if first {
                         first = false;
                     } else {
                         bpms.push(',');
                     }
-                    write!(bpms, "{}={}", beat, bpm).unwrap();
+                    write!(bpms, "{}={}", point.beat.as_float(), point.bpm()).unwrap();
                 }
                 bpms
             },
         )?;
-        for chart in self.charts.iter() {
+        for sm in simfiles {
             write!(
                 file,
                 r#"
@@ -136,17 +123,17 @@ impl Simfile {
     {diff_name}:
     {diff_num}:
     {radar0}, {radar1}, {radar2}, {radar3}, {radar4}:"#,
-                gamemode = chart.gamemode.id(),
-                desc = chart.desc,
-                diff_name = chart.difficulty.name(),
-                diff_num = chart.difficulty_num,
-                radar0 = chart.radar[0],
-                radar1 = chart.radar[1],
-                radar2 = chart.radar[2],
-                radar3 = chart.radar[3],
-                radar4 = chart.radar[4],
+                gamemode = sm.gamemode.id(),
+                desc = sm.desc,
+                diff_name = sm.difficulty.name(),
+                diff_num = sm.difficulty_num,
+                radar0 = sm.radar[0],
+                radar1 = sm.radar[1],
+                radar2 = sm.radar[2],
+                radar3 = sm.radar[3],
+                radar4 = sm.radar[4],
             )?;
-            write_notedata(&mut file, &chart)?;
+            write_notedata(&mut file, &sm)?;
             write!(file, ";")?;
         }
         Ok(())
@@ -163,13 +150,12 @@ impl Simfile {
     }
 
     /// There seems to be a max of 6 difficulties, so use them wisely and sort them.
-    pub fn spread_difficulties(&mut self) -> Result<()> {
+    pub fn spread_difficulties(simfiles: &mut Vec<Box<Simfile>>) -> Result<()> {
         //Create an auxiliary vec holding chart indices and difficulties
-        let mut order = self
-            .charts
+        let mut order = simfiles
             .iter()
             .enumerate()
-            .map(|(idx, chart)| (idx, self.difficulty_of(chart)))
+            .map(|(idx, sm)| (idx, sm.difficulty()))
             .collect::<Vec<_>>();
         trace!("    raw difficulties: {:?}", order);
 
@@ -201,26 +187,24 @@ impl Simfile {
         trace!("    with conflicts resolved: {:?}", order);
 
         //Reorder charts
-        for chart in self.charts.iter_mut() {
+        for chart in simfiles.iter_mut() {
             chart.difficulty_num = 0. / 0.;
         }
         for (idx, diff) in order.iter() {
-            self.charts[*idx].difficulty_num = *diff;
+            simfiles[*idx].difficulty_num = *diff;
         }
-        self.charts.retain(|chart| !chart.difficulty_num.is_nan());
-        self.charts
-            .sort_by_key(|chart| SortableFloat(chart.difficulty_num));
+        simfiles.retain(|chart| !chart.difficulty_num.is_nan());
+        simfiles.sort_by_key(|chart| SortableFloat(chart.difficulty_num));
         trace!(
             "    final chart difficulties: {:?}",
-            self.charts
+            simfiles
                 .iter()
                 .map(|chart| chart.difficulty_num)
                 .collect::<Vec<_>>()
         );
 
         //Reassign difficulty names from numbers
-        let mut difficulties = self
-            .charts
+        let mut difficulties = simfiles
             .iter()
             .map(|chart| {
                 let (diff, _d) = AVAILABLE_DIFFICULTIES
@@ -308,13 +292,13 @@ impl Simfile {
         );
 
         //Convert back from difficulty indices to actual difficulties
-        for (chart, diff_idx) in self.charts.iter_mut().zip(difficulties) {
+        for (chart, diff_idx) in simfiles.iter_mut().zip(difficulties) {
             chart.difficulty = AVAILABLE_DIFFICULTIES[diff_idx as usize];
             chart.difficulty_num = chart.difficulty_num.round();
         }
         trace!(
             "    final chart difficulties: {:?}",
-            self.charts
+            simfiles
                 .iter()
                 .map(|chart| format!("{} ({})", chart.difficulty.name(), chart.difficulty_num))
                 .collect::<Vec<_>>()
@@ -324,12 +308,43 @@ impl Simfile {
     }
 
     /// Get the estimated difficulty of a certain chart.
-    pub fn difficulty_of(&self, chart: &Chart) -> f64 {
+    pub fn difficulty(&self) -> f64 {
         fn adapt_range(src: (f64, f64), dst: (f64, f64), val: f64) -> f64 {
             dst.0 + (val - src.0) / (src.1 - src.0) * (dst.1 - dst.0)
         }
-        let diff = adapt_range((6., 14.), (1., 12.), (chart.notes.len() as f64).log2());
+        let diff = adapt_range((6., 14.), (1., 12.), (self.notes.len() as f64).log2());
         diff.max(1.)
+    }
+
+    /// Osu allows two notes at the same time and key, but the `.sm` format disallows this.
+    ///
+    /// Having two notes at the exact same location is usually wrong, except for the tail -> head
+    /// or tail -> hit case (where a note ends and another note immediately starts).
+    /// In order to fix this, if there is a tail and afterwards at the exact same beat and key
+    /// there is another note, the tail is moved back a little.
+    /// Note that this requires sorting the notes if any is moved.
+    pub fn fix(&mut self) -> Result<()> {
+        let mut cur_beat = BeatPos::from_float(0.);
+        let mut cur_beat_first_note = 0;
+        for i in 0..self.notes.len() {
+            let note = &self.notes[i];
+            if note.beat > cur_beat {
+                cur_beat_first_note = i;
+                cur_beat = note.beat;
+            }
+            if note.is_tail() {
+                if self.notes[i + 1..]
+                    .iter()
+                    .take_while(|next_n| next_n.beat == cur_beat)
+                    .any(|next_n| next_n.key == note.key)
+                {
+                    //Move back by the smallest beat unit, and to the previous beat
+                    self.notes[i].beat -= BeatPos { frac: 1 };
+                    self.notes[cur_beat_first_note..i + 1].rotate_right(1);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -416,19 +431,19 @@ fn write_measure(
     Ok(())
 }
 
-fn write_notedata(file: &mut impl Write, chart: &Chart) -> Result<()> {
+fn write_notedata(file: &mut impl Write, sm: &Simfile) -> Result<()> {
     struct CurMeasure {
         first_note: usize,
         start_beat: BeatPos,
     }
 
-    let key_count = chart.gamemode.key_count();
+    let key_count = sm.gamemode.key_count();
     let mut measure_counter = 0;
     let mut cur_measure = CurMeasure {
         first_note: 0,
         start_beat: BeatPos::from_float(0.),
     };
-    for (note_idx, note) in chart.notes.iter().enumerate() {
+    for (note_idx, note) in sm.notes.iter().enumerate() {
         //Finish any pending measures
         while (note.beat - cur_measure.start_beat) >= BeatPos::from_float(BEATS_IN_MEASURE as f64) {
             write_measure(
@@ -436,7 +451,7 @@ fn write_notedata(file: &mut impl Write, chart: &Chart) -> Result<()> {
                 key_count,
                 measure_counter,
                 cur_measure.start_beat,
-                &chart.notes[cur_measure.first_note..note_idx],
+                &sm.notes[cur_measure.first_note..note_idx],
             )?;
             measure_counter += 1;
             cur_measure.first_note = note_idx;
@@ -450,19 +465,9 @@ fn write_notedata(file: &mut impl Write, chart: &Chart) -> Result<()> {
         key_count,
         measure_counter,
         cur_measure.start_beat,
-        &chart.notes[cur_measure.first_note..chart.notes.len()],
+        &sm.notes[cur_measure.first_note..sm.notes.len()],
     )?;
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub struct Chart {
-    pub gamemode: Gamemode,
-    pub desc: String,
-    pub difficulty: Difficulty,
-    pub difficulty_num: f64,
-    pub radar: [f64; 5],
-    pub notes: Vec<Note>,
 }
 
 /// From the StepMania source,
@@ -523,6 +528,7 @@ pub struct Chart {
 /// { "kickbox-arachnid", 8, true, StepsTypeCategory_Single },
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum Gamemode {
     DanceSingle,
     DanceDouble,
@@ -563,12 +569,6 @@ pub enum Gamemode {
     KickboxArachnid,
 }
 impl Gamemode {
-    pub fn from_keycount(key_count: i32) -> Option<Gamemode> {
-        *GAMEMODES_BY_KEYCOUNT
-            .get(key_count as usize)
-            .unwrap_or(&None)
-    }
-
     pub fn key_count(&self) -> i32 {
         use Gamemode::*;
         match self {
@@ -709,17 +709,27 @@ impl BeatPos {
         self.frac as f64 / Self::FIXED_POINT as f64
     }
 }
+impl ops::AddAssign for BeatPos {
+    fn add_assign(&mut self, rhs: Self) {
+        self.frac += rhs.frac;
+    }
+}
 impl ops::Add for BeatPos {
     type Output = Self;
     fn add(mut self, rhs: Self) -> Self {
-        self.frac += rhs.frac;
+        self += rhs;
         self
+    }
+}
+impl ops::SubAssign for BeatPos {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.frac -= rhs.frac;
     }
 }
 impl ops::Sub for BeatPos {
     type Output = Self;
     fn sub(mut self, rhs: Self) -> Self {
-        self.frac -= rhs.frac;
+        self -= rhs;
         self
     }
 }
@@ -734,4 +744,72 @@ pub struct Note {
     pub kind: char,
     pub beat: BeatPos,
     pub key: i32,
+}
+impl Note {
+    pub const KIND_HIT: char = '1';
+    pub const KIND_HEAD: char = '2';
+    pub const KIND_TAIL: char = '3';
+
+    pub fn is_hit(&self) -> bool {
+        self.kind == Self::KIND_HIT
+    }
+
+    pub fn is_head(&self) -> bool {
+        self.kind == Self::KIND_HEAD
+    }
+
+    pub fn is_tail(&self) -> bool {
+        self.kind == Self::KIND_TAIL
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlPoint {
+    /// First beat of the control point.
+    pub beat: BeatPos,
+    /// Length of a beat in seconds.
+    pub beat_len: f64,
+}
+impl ControlPoint {
+    pub fn bpm(&self) -> f64 {
+        60. / self.beat_len
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToTime<'a> {
+    bpms: &'a [ControlPoint],
+    cur_idx: usize,
+    cur_time: f64,
+}
+impl ToTime<'_> {
+    pub fn new(sm: &Simfile) -> ToTime {
+        ToTime {
+            bpms: &sm.bpms,
+            cur_idx: 0,
+            cur_time: -sm.offset,
+        }
+    }
+
+    /// Returns incorrect results if called with non-monotonic beat positions.
+    /// If needing to seek back in time, create a new `ToTime` or make "checkpoints" with `Clone`.
+    pub fn beat_to_time(&mut self, beat: BeatPos) -> f64 {
+        //Advance control points
+        while self.cur_idx + 1 < self.bpms.len() {
+            let cur_bpm = &self.bpms[self.cur_idx];
+            let next_bpm = &self.bpms[self.cur_idx + 1];
+            if beat >= next_bpm.beat {
+                //Advance to this control point
+                let adv_time = (next_bpm.beat - cur_bpm.beat).as_float() * cur_bpm.beat_len;
+                self.cur_time += adv_time;
+                self.cur_idx += 1;
+            } else {
+                //Still within the current timing point
+                break;
+            }
+        }
+        //Use the current control point to determine the time corresponding to this beat
+        let cur_bpm = &self.bpms[self.cur_idx];
+        self.cur_time + (beat - cur_bpm.beat).as_float() * cur_bpm.beat_len
+    }
 }

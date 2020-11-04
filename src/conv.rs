@@ -1,11 +1,13 @@
+//! Convert osu! beatmaps to stepmania simfiles.
+
 use crate::prelude::*;
 
-pub(crate) fn convert(
-    ctx: &Ctx,
+pub(crate) fn convert<'a>(
+    ctx: &'a Ctx,
     bmset_path: &Path,
     _bm_path: &Path,
     bm: Beatmap,
-) -> Result<Simfile> {
+) -> Result<SimfileList> {
     ensure!(
         bm.mode == osufile::MODE_MANIA,
         "mode not supported ({}) only mania (3) is currently supported",
@@ -32,7 +34,7 @@ pub(crate) fn convert(
         cur_tp: TimingPoint,
         cur_beat: BeatPos,
         timing_points: &'a [TimingPoint],
-        out_bpms: Vec<(f64, f64)>,
+        out_bpms: Vec<ControlPoint>,
         out_notes: Vec<Note>,
     }
     let mut conv = ConvCtx {
@@ -43,10 +45,6 @@ pub(crate) fn convert(
         out_bpms: Vec::new(),
         out_notes: Vec::new(),
     };
-    /// Convert a beat length in milliseconds to beats-per-minute.
-    fn beatlen_to_bpm(beat_len_ms: f64) -> f64 {
-        60000. / beat_len_ms
-    }
     /// Convert from a point in time to a snapped beat number, taking into account changing BPM.
     /// Should never be called with a time smaller than the last call!
     fn get_beat(conv: &mut ConvCtx, time: f64) -> BeatPos {
@@ -60,10 +58,10 @@ pub(crate) fn convert(
                 let adv_beat_nonscaled = (next_tp.time - conv.cur_tp.time) / conv.cur_tp.beat_len;
                 conv.cur_beat = conv.cur_beat + BeatPos::from_float(adv_beat_nonscaled);
                 conv.cur_tp = next_tp.clone();
-                conv.out_bpms.push((
-                    conv.cur_beat.as_float(),
-                    beatlen_to_bpm(conv.cur_tp.beat_len),
-                ));
+                conv.out_bpms.push(ControlPoint {
+                    beat: conv.cur_beat,
+                    beat_len: conv.cur_tp.beat_len / 1000.,
+                });
             } else {
                 //Still within the current timing point
                 break;
@@ -80,7 +78,10 @@ pub(crate) fn convert(
             first_tp.time -= first_tp.beat_len * first_tp.meter as f64;
         }
         conv.cur_tp = first_tp.clone();
-        conv.out_bpms.push((0., beatlen_to_bpm(first_tp.beat_len)));
+        conv.out_bpms.push(ControlPoint {
+            beat: BeatPos::from_float(0.),
+            beat_len: first_tp.beat_len / 1000.,
+        });
     }
     // Add hit objects as measure objects, pushing out SM notedata on the fly.
     let mut pending_tails = Vec::new();
@@ -98,7 +99,7 @@ pub(crate) fn convert(
                 // Insert now
                 let end_beat = get_beat(&mut conv, time);
                 conv.out_notes.push(Note {
-                    kind: '3',
+                    kind: Note::KIND_TAIL,
                     beat: end_beat,
                     key,
                 });
@@ -142,14 +143,14 @@ pub(crate) fn convert(
             pending_tails.insert(insert_idx, (end_time, obj_key));
             // Insert the long note head
             conv.out_notes.push(Note {
-                kind: '2',
+                kind: Note::KIND_HEAD,
                 beat: obj_beat,
                 key: obj_key,
             });
         } else if obj.ty & osufile::TYPE_HIT != 0 {
             // Hit note
             conv.out_notes.push(Note {
-                kind: '1',
+                kind: Note::KIND_HIT,
                 beat: obj_beat,
                 key: obj_key,
             });
@@ -166,7 +167,7 @@ pub(crate) fn convert(
     }
     // Generate sample length from audio file
     let default_len = 60.;
-    let sample_len = if bm.audio.is_empty() {
+    let sample_len = if bm.audio.is_empty() || !ctx.opts.query_audio_len {
         default_len
     } else {
         let audio_path = bmset_path.join(&bm.audio);
@@ -180,45 +181,51 @@ pub(crate) fn convert(
         }
         (len - bm.preview_start / 1000.).max(10.)
     };
-    // Create final SM file.
-    let sm = Simfile {
-        title: if ctx.opts.unicode {
-            bm.title_unicode
-        } else {
-            bm.title.clone()
-        },
-        title_trans: bm.title,
-        subtitle: bm.version.clone(),
-        subtitle_trans: bm.version.clone(),
-        artist: if ctx.opts.unicode {
-            bm.artist_unicode
-        } else {
-            bm.artist.clone()
-        },
-        artist_trans: bm.artist,
-        genre: String::new(),
-        credit: bm.creator,
-        banner: None,
-        background: Some(bm.background.into()),
-        lyrics: None,
-        cdtitle: None,
-        music: Some(bm.audio.into()),
-        offset: first_tp.time / -1000.,
-        bpms: conv.out_bpms,
-        stops: vec![],
-        sample_start: Some(bm.preview_start / 1000.),
-        sample_len: Some(sample_len),
-        charts: vec![Chart {
-            gamemode: Gamemode::from_keycount(key_count as i32)
-                .ok_or_else(|| anyhow!("no stepmania gamemode with {} keys", key_count))?,
-            desc: bm.version,
+    // Create the final SM file in all supported gamemodes
+    let gamemodes = ctx
+        .opts
+        .gamemodes
+        .iter()
+        .copied()
+        .filter(|gm| gm.key_count() == key_count as i32);
+    let mut out = Vec::with_capacity(gamemodes.clone().count());
+    for gamemode in gamemodes {
+        out.push(Box::new(Simfile {
+            title: if ctx.opts.unicode {
+                bm.title_unicode.clone()
+            } else {
+                bm.title.clone()
+            },
+            title_trans: bm.title.clone(),
+            subtitle: bm.version.clone(),
+            subtitle_trans: bm.version.clone(),
+            artist: if ctx.opts.unicode {
+                bm.artist_unicode.clone()
+            } else {
+                bm.artist.clone()
+            },
+            artist_trans: bm.artist.clone(),
+            genre: String::new(),
+            credit: bm.creator.clone(),
+            banner: None,
+            background: Some(bm.background.clone().into()),
+            lyrics: None,
+            cdtitle: None,
+            music: Some(bm.audio.clone().into()),
+            offset: first_tp.time / -1000.,
+            bpms: conv.out_bpms.clone(),
+            stops: vec![],
+            sample_start: Some(bm.preview_start / 1000.),
+            sample_len: Some(sample_len),
+            gamemode,
+            desc: bm.version.clone(),
             difficulty: Difficulty::Edit,
             difficulty_num: 0.,
             radar: [0., 0., 0., 0., 0.],
-            notes: conv.out_notes,
-        }],
-    };
-    Ok(sm)
+            notes: conv.out_notes.clone(),
+        }));
+    }
+    Ok(out)
 }
 
 /// Get the length of an audio file in seconds.
