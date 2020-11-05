@@ -96,8 +96,8 @@ pub enum BucketId {
     Resolved(String, bool),
     Auto,
     Null,
-    Named(String),
-    Inline(Box<ConcreteTransform>),
+    Name(String),
+    Nest(Vec<ConcreteTransform>),
 }
 impl Default for BucketId {
     fn default() -> Self {
@@ -121,6 +121,7 @@ impl BucketId {
 
 pub trait Transform: fmt::Debug {
     fn apply(&self, sm_store: &mut SimfileStore) -> Result<()>;
+    /// Must yield all `BucketIter::Input` values before all `BucketIter::Output` values.
     fn buckets_mut(&mut self) -> BucketIter;
 }
 
@@ -146,57 +147,111 @@ impl BucketKind {
     }
 }
 
-pub fn resolve_buckets(transforms: &mut Vec<Box<dyn Transform>>) -> Result<()> {
-    let mut next_id = 0;
-    let mut gen_unique_name = || {
-        next_id += 1;
-        format!("~{}", next_id)
-    };
-    //Process transforms and output them here
-    let mut out_transforms = Vec::with_capacity(transforms.len());
-    //Keep track of the last auto-output, to bind it to any auto-input
-    let mut last_magnetic_out = None;
-    let in_transform_count = transforms.len();
-    for (i, mut trans) in transforms.drain(..).enumerate() {
-        //The last transform has its output automatically bound to `~out`
-        let mut magnetic_out = if i + 1 == in_transform_count {
-            Some("~out".to_string())
-        } else {
-            None
-        };
-        //Resolve each bucket
-        for (kind, bucket) in trans.buckets_mut() {
-            let name = match bucket {
-                BucketId::Auto => match kind {
-                    BucketKind::Input => last_magnetic_out.as_deref().unwrap_or("~in").to_string(),
-                    BucketKind::Output => magnetic_out
-                        .get_or_insert_with(&mut gen_unique_name)
-                        .clone(),
-                    BucketKind::Generic => bail!(
-                        "    attempt to auto-bind generic bucket (in transform {})",
-                        i + 1
-                    ),
-                },
-                BucketId::Named(name) => {
-                    ensure!(
-                        !name.starts_with("~"),
-                        "bucket names starting with '~' are reserved and cannot be used"
-                    );
-                    mem::replace(name, String::new())
-                }
-                BucketId::Inline(trans) => todo!("inline transforms"),
-                BucketId::Null => "".to_string(),
-                BucketId::Resolved(..) => bail!("resolved buckets cannot be used directly"),
-            };
-            *bucket = BucketId::Resolved(name, false);
-        }
-        //Bookkeeping
-        last_magnetic_out = magnetic_out;
-        out_transforms.push(trans);
+pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn Transform>>> {
+    struct State {
+        out: Vec<Box<dyn Transform>>,
+        next_id: u32,
     }
+    impl State {
+        fn gen_unique_name(&mut self) -> String {
+            self.next_id += 1;
+            format!("~{}", self.next_id)
+        }
+    }
+    //Keep track of the last auto-output, to bind it to any auto-input
+    fn resolve_layer(
+        ctx: &mut State,
+        input: &str,
+        output: &str,
+        transforms: &[ConcreteTransform],
+        chained: bool,
+    ) -> Result<()> {
+        let mut last_magnetic_out = Some(input.to_string());
+        let in_transform_count = transforms.len();
+        for (i, orig_trans) in transforms.iter().enumerate() {
+            let mut trans = orig_trans.clone().into_dyn();
+            //The last transform has its output automatically bound to the output
+            //However, in non-chained mode the output is always bound to the parent output
+            let mut magnetic_out = if !chained || i + 1 == in_transform_count {
+                Some(output.to_string())
+            } else {
+                None
+            };
+            //In non-chained mode the input is always the parent input
+            if !chained {
+                last_magnetic_out = Some(input.to_string());
+            }
+            let mut insert_idx = ctx.out.len();
+            //Resolve each bucket
+            for (kind, bucket) in trans.buckets_mut() {
+                let name = match bucket {
+                    BucketId::Auto => match kind {
+                        BucketKind::Input => last_magnetic_out
+                            .take()
+                            .ok_or_else(|| anyhow!("attempt to use input, but previous transform does not output (in transform {:?})", orig_trans))?,
+                        BucketKind::Output => magnetic_out
+                            .get_or_insert_with(|| ctx.gen_unique_name())
+                            .clone(),
+                        BucketKind::Generic => bail!(
+                            "attempt to auto-bind generic bucket (in transform {})",
+                            i + 1
+                        ),
+                    },
+                    BucketId::Name(name) => {
+                        ensure!(
+                            !name.starts_with("~"),
+                            "bucket names starting with '~' are reserved and cannot be used"
+                        );
+                        mem::replace(name, String::new())
+                    }
+                    BucketId::Nest(inner_list) => {
+                        match kind {
+                            BucketKind::Input => {
+                                let into_nested = last_magnetic_out
+                                    .take()
+                                    .ok_or_else(|| anyhow!("attempt to use input, but previous transform does not output (in transform {:?})", orig_trans))?;
+                                let from_nested = ctx.gen_unique_name();
+                                resolve_layer(ctx, &into_nested, &from_nested, inner_list, false)?;
+                                //Evaluate the current transform _after_ the nested transform is
+                                //evaluated
+                                insert_idx = ctx.out.len();
+                                from_nested
+                            }
+                            BucketKind::Output => {
+                                let into_nested = ctx.gen_unique_name();
+                                let from_nested =
+                                    magnetic_out.get_or_insert_with(|| ctx.gen_unique_name());
+                                resolve_layer(ctx, &into_nested, from_nested, inner_list, false)?;
+                                into_nested
+                            }
+                            BucketKind::Generic => bail!("cannot use generic buckets with `Nest`"),
+                        }
+                    },
+                    BucketId::Null => "".to_string(),
+                    BucketId::Resolved(..) => bail!("resolved buckets cannot be used directly"),
+                };
+                *bucket = BucketId::Resolved(name, false);
+            }
+            //Bookkeeping
+            ensure!(
+                last_magnetic_out.is_none() || i == 0,
+                "output from previous transform is not used as input (in transform {:?})",
+                trans
+            );
+            last_magnetic_out = magnetic_out;
+            ctx.out.insert(insert_idx, trans);
+        }
+        Ok(())
+    }
+    //Process transforms and output them here
+    let mut ctx = State {
+        out: Vec::with_capacity(transforms.len()),
+        next_id: 0,
+    };
+    resolve_layer(&mut ctx, "~in", "~out", transforms, true)?;
     //Optimize the last reads from each bucket, by taking the value instead of cloning it
     let mut last_reads: HashMap<String, &mut BucketId> = default();
-    for trans in out_transforms.iter_mut() {
+    for trans in ctx.out.iter_mut() {
         for (kind, bucket) in trans.buckets_mut() {
             if kind.is_input() {
                 last_reads.insert(bucket.unwrap_name().to_string(), bucket);
@@ -211,9 +266,8 @@ pub fn resolve_buckets(transforms: &mut Vec<Box<dyn Transform>>) -> Result<()> {
             _ => panic!("unresolved bucket"),
         }
     }
-    //Finally, write the output
-    *transforms = out_transforms;
-    Ok(())
+    //Finally, unwrap the output
+    Ok(ctx.out)
 }
 
 macro_rules! make_concrete {

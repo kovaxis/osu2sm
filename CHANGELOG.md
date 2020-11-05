@@ -12,3 +12,5 @@
 - Consider making osu! loader and simfile writer themselves a transform, and remove global `~in`
     and `~out`.
 - Use `bumpalo` for fastness.
+- Add true snap.
+- Set difficulty number from in-practice BPM.

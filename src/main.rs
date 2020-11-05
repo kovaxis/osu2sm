@@ -789,14 +789,10 @@ fn run() -> Result<()> {
     }
     let mut ctx = Ctx {
         sm_store: RefCell::new(default()),
-        transforms: opts
-            .transforms
-            .drain(..)
-            .map(|trans| trans.into_dyn())
-            .collect(),
+        transforms: transform::resolve_buckets(&opts.transforms)
+            .context("failed to resolve transforms")?,
         opts,
     };
-    transform::resolve_buckets(&mut ctx.transforms).context("failed to resolve transforms")?;
     info!("scanning for beatmaps in \"{}\"", ctx.opts.input.display());
     info!("outputting simfiles in \"{}\"", ctx.opts.output.display());
     if ctx.opts.in_place {
