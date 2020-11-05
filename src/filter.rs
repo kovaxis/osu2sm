@@ -6,25 +6,34 @@ use crate::prelude::*;
 pub enum Filter {
     Convert(Convert),
     Simultaneous(i32),
+    Snap(Snap),
     Whitelist(Vec<Gamemode>),
     Blacklist(Vec<Gamemode>),
 }
 impl Filter {
     pub fn apply(&self, sm: &mut Simfile) -> Result<(bool, SimfileList)> {
         Ok(match self {
-            Filter::Convert(conf) => (true, batch_convert(sm, conf)?),
+            Filter::Convert(conf) => (
+                true,
+                batch_apply(sm, &conf.into, |sm, &gm| convert(sm, conf, gm))?,
+            ),
             Filter::Simultaneous(max) => {
                 limit_simultaneous_keys(sm, *max as usize)?;
                 (true, Vec::new())
             }
+            Filter::Snap(conf) => (
+                true,
+                batch_apply(sm, &conf.target_bpms, |sm, &bpm| snap(sm, conf, bpm))?,
+            ),
             Filter::Whitelist(gms) => (should_keep(sm, gms, true), Vec::new()),
             Filter::Blacklist(gms) => (should_keep(sm, gms, false), Vec::new()),
         })
     }
 }
 
-fn simfile_seed(sm: &Simfile, salt: &str) -> u64 {
-    fxhash::hash64(&(&sm.music, &sm.title_trans, &sm.desc, salt))
+fn simfile_rng(sm: &Simfile, name: &str) -> FastRng {
+    let seed = fxhash::hash64(&(&sm.music, &sm.title_trans, &sm.desc, name));
+    FastRng::seed_from_u64(seed)
 }
 
 fn should_keep(sm: &Simfile, gms: &[Gamemode], white: bool) -> bool {
@@ -32,6 +41,7 @@ fn should_keep(sm: &Simfile, gms: &[Gamemode], white: bool) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Convert {
     /// Into what gamemodes to convert.
     /// Note that a single map could be converted to multiple gamemodes simultaneously.
@@ -41,15 +51,42 @@ pub struct Convert {
     /// Weighting options to prevent too many jacks (quick notes on the same key).
     pub weight_curve: Vec<(f32, f32)>,
 }
+impl Default for Convert {
+    fn default() -> Self {
+        Self {
+            into: vec![Gamemode::PumpSingle],
+            avoid_shuffle: true,
+            weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
+        }
+    }
+}
 
-fn batch_convert(sm: &mut Simfile, conf: &Convert) -> Result<SimfileList> {
-    let mut out = Vec::with_capacity(conf.into.len());
-    for (idx, &gm) in conf.into.iter().enumerate() {
-        if idx + 1 == conf.into.len() {
-            convert(sm, conf, gm)?;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snap {
+    /// Into about which bpms to snap.
+    pub target_bpms: Vec<f64>,
+}
+impl Default for Snap {
+    fn default() -> Self {
+        Self {
+            target_bpms: vec![60., 120., 180., 240., 300.],
+        }
+    }
+}
+
+fn batch_apply<T>(
+    sm: &mut Simfile,
+    list: &[T],
+    mut apply: impl FnMut(&mut Simfile, &T) -> Result<()>,
+) -> Result<SimfileList> {
+    let mut out = Vec::with_capacity(list.len() - 1);
+    for (idx, t) in list.iter().enumerate() {
+        if idx + 1 == list.len() {
+            apply(sm, t)?;
         } else {
             let mut tmp = Box::new(sm.clone());
-            convert(&mut tmp, conf, gm)?;
+            apply(&mut tmp, t)?;
             out.push(tmp);
         }
     }
@@ -94,7 +131,7 @@ fn convert(sm: &mut Simfile, conf: &Convert, new_gm: Gamemode) -> Result<()> {
     //Detach note buffer for lifetiming purposes
     let mut notes = mem::replace(&mut sm.notes, Vec::new());
     //To randomize key mappings
-    let mut rng = FastRng::seed_from_u64(simfile_seed(sm, "convert"));
+    let mut rng = simfile_rng(sm, "convert");
     //Beat -> time
     let mut to_time = ToTime::new(sm);
 
@@ -174,7 +211,7 @@ fn limit_simultaneous_keys(sm: &mut Simfile, max_simultaneous: usize) -> Result<
         max_simultaneous,
         key_count,
     );
-    let mut rng = FastRng::seed_from_u64(simfile_seed(sm, "simultaneous"));
+    let mut rng = simfile_rng(sm, "simultaneous");
     let mut active_notes = vec![false; key_count];
     let mut beat_notes = Vec::with_capacity(key_count);
     let mut note_idx = 0;
@@ -214,5 +251,119 @@ fn limit_simultaneous_keys(sm: &mut Simfile, max_simultaneous: usize) -> Result<
     }
     //Actually remove notes
     sm.notes.retain(|note| note.key >= 0);
+    Ok(())
+}
+
+fn snap(sm: &mut Simfile, _conf: &Snap, bpm: f64) -> Result<()> {
+    // Minimum distance between notes
+    let min_dist = 60. / bpm - 0.010;
+    trace!(
+        "    removing notes in order to make a minimum distance of {}s",
+        min_dist
+    );
+    // To prevent any recognizable patterns from forming
+    let mut rng = simfile_rng(sm, "snap");
+    // Cache note times, because notes will be randomly accessed
+    let note_times = {
+        let mut to_time = ToTime::new(sm);
+        sm.notes
+            .iter()
+            .map(|note| to_time.beat_to_time(note.beat))
+            .collect::<Vec<_>>()
+    };
+    //Create an array of references to notes, sorted from most removable to least removable
+    let mut note_refs = (0..sm.notes.len())
+        .filter(|&idx| !sm.notes[idx].is_tail())
+        .collect::<Vec<_>>();
+    note_refs.sort_by_cached_key(|&idx| {
+        ((64 - sm.notes[idx].beat.denominator() as u32) << (32 - 6))
+            | ((rng.gen::<u32>() << 6) >> 6)
+    });
+    // Remove any notes that have neighbors that are too close
+    for &note_idx in note_refs.iter() {
+        let this_beat = sm.notes[note_idx].beat;
+        let this_time = note_times[note_idx];
+        let mut keep = true;
+
+        //Check forward gap
+        if let Some(indices_to_next_note) = sm.notes[note_idx + 1..]
+            .iter()
+            .position(|note| !note.is_tail() && note.key >= 0 && note.beat > this_beat)
+        {
+            let next_note = note_idx + 1 + indices_to_next_note;
+            let gap = note_times[next_note] - this_time;
+            keep = gap >= min_dist;
+            trace!(
+                "        forward gap from {} - {}: {}s ({})",
+                note_idx,
+                next_note,
+                gap,
+                if keep { "keeping" } else { "removing" }
+            );
+        }
+
+        //Check backward gap
+        if keep {
+            if let Some(indices_to_prev_note) = sm.notes[..note_idx]
+                .iter()
+                .rev()
+                .position(|note| !note.is_tail() && note.key >= 0 && note.beat < this_beat)
+            {
+                let prev_note = note_idx - 1 - indices_to_prev_note;
+                let gap = this_time - note_times[prev_note];
+                keep = gap >= min_dist;
+                trace!(
+                    "        backward gap from {} - {}: {}s ({})",
+                    note_idx,
+                    prev_note,
+                    gap,
+                    if keep { "keeping" } else { "removing" }
+                );
+            }
+        }
+
+        //Remove if too close
+        if !keep {
+            //If removing a head, also remove its tail
+            if sm.notes[note_idx].is_head() {
+                let head_key = sm.notes[note_idx].key;
+                for next_note in sm.notes[note_idx + 1..].iter_mut() {
+                    if next_note.is_tail() && next_note.key == head_key {
+                        next_note.key = -1;
+                        break;
+                    }
+                }
+            }
+            //Mark this note for removal
+            sm.notes[note_idx].key = -1;
+        }
+    }
+    //Actually remove notes
+    sm.notes.retain(|note| note.key >= 0);
+    //Sanity check
+    let mut to_time = ToTime::new(sm);
+    let mut last_time = 0.;
+    let notes_without_tails = sm
+        .notes
+        .iter()
+        .filter(|note| !note.is_tail())
+        .cloned()
+        .collect::<Vec<_>>();
+    for (idx, note) in notes_without_tails.iter().enumerate() {
+        let time = to_time.beat_to_time(note.beat);
+        if idx > 0 {
+            let prev = &notes_without_tails[idx - 1];
+            let dist = (time - last_time).abs();
+            ensure!(
+                note.beat == prev.beat || dist >= min_dist,
+                "sanity check failed: notes at beats {} and {} are only {}s apart (should be at least {}s apart)",
+                prev.beat,
+                note.beat,
+                dist,
+                min_dist,
+            );
+        }
+        last_time = time;
+    }
     Ok(())
 }

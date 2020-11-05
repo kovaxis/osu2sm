@@ -700,15 +700,30 @@ impl BeatPos {
     const FIXED_POINT: i32 = 48;
     pub const EPSILON: BeatPos = BeatPos { frac: 1 };
 
+    /// Get the beat number as an `f64`.
     pub fn as_num(self) -> f64 {
         self.into()
     }
 
+    /// Round this beat position to the nearest 1/`divisions` of a beat.
     pub fn round(mut self, divisions: i32) -> Self {
         let round_to = Self::FIXED_POINT / divisions;
         self.frac += round_to / 2;
         self.frac -= self.frac % round_to;
         self
+    }
+
+    /// Get the denominator of the most-simplified version of this beat (eg. 1/2, 3/4, 0/1, 19/16).
+    pub fn denominator(self) -> i32 {
+        let mut num = self.frac;
+        let mut den = BeatPos::FIXED_POINT;
+        for &factor in [2, 3].iter() {
+            while num % factor == 0 && den % factor == 0 {
+                num /= factor;
+                den /= factor;
+            }
+        }
+        den
     }
 }
 impl From<f64> for BeatPos {

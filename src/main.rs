@@ -178,8 +178,7 @@ impl Default for Opts {
             filters: vec![
                 Filter::Convert(filter::Convert {
                     into: vec![Gamemode::DanceSingle],
-                    avoid_shuffle: true,
-                    weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
+                    ..default()
                 }),
                 Filter::Whitelist(vec![Gamemode::DanceSingle]),
             ],
