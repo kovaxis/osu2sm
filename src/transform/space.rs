@@ -1,27 +1,40 @@
+//! Make a minimum space between notes by removing higher-divisor notes.
+
 use crate::transform::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Snap {
+pub struct Space {
     pub from: BucketId,
     pub into: BucketId,
-    pub bpm: f64,
+    pub min_dist: MinDist,
 }
-impl Default for Snap {
+impl Default for Space {
     fn default() -> Self {
         Self {
             from: default(),
             into: default(),
-            bpm: 120.,
+            min_dist: MinDist::Bpm(120.),
         }
     }
 }
 
-impl Transform for Snap {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MinDist {
+    Bpm(f64),
+    Beats(f64),
+}
+impl Default for MinDist {
+    fn default() -> Self {
+        Self::Beats(1.)
+    }
+}
+
+impl Transform for Space {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             for sm in list.iter_mut() {
-                snap(sm, self)?;
+                make_space(sm, self)?;
             }
             store.put(&self.into, list);
             Ok(())
@@ -35,15 +48,9 @@ impl Transform for Snap {
     }
 }
 
-fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
-    // Minimum distance between notes
-    let min_dist = 60. / conf.bpm - 0.010;
-    trace!(
-        "    removing notes in order to make a minimum distance of {}s",
-        min_dist
-    );
+fn make_space(sm: &mut Simfile, conf: &Space) -> Result<()> {
     // To prevent any recognizable patterns from forming
-    let mut rng = simfile_rng(sm, "snap");
+    let mut rng = simfile_rng(sm, "space");
     // Cache note times, because notes will be randomly accessed
     let note_times = {
         let mut to_time = ToTime::new(sm);
@@ -51,6 +58,35 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
             .iter()
             .map(|note| to_time.beat_to_time(note.beat))
             .collect::<Vec<_>>()
+    };
+    // Minimum distance between notes
+    let min_limit_secs;
+    let secs_func;
+    let min_limit_beats;
+    let beat_func;
+    let are_far_enough: &dyn Fn(&[Note], usize, usize) -> bool = match conf.min_dist {
+        MinDist::Bpm(bpm) => {
+            min_limit_secs = 60. / bpm - 0.010;
+            trace!(
+                "    removing notes in order to make a minimum distance of {}s",
+                min_limit_secs,
+            );
+            secs_func = |_notes: &[Note], a: usize, b: usize| {
+                note_times[b] - note_times[a] >= min_limit_secs
+            };
+            &secs_func
+        }
+        MinDist::Beats(beats) => {
+            min_limit_beats = BeatPos::from(beats);
+            trace!(
+                "    removing notes in order to make a minimum distance of {} beats",
+                min_limit_beats,
+            );
+            beat_func = |notes: &[Note], a: usize, b: usize| {
+                notes[b].beat - notes[a].beat >= min_limit_beats
+            };
+            &beat_func
+        }
     };
     //Create an array of references to notes, sorted from most removable to least removable
     let mut note_refs = (0..sm.notes.len())
@@ -63,7 +99,6 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
     // Remove any notes that have neighbors that are too close
     for &note_idx in note_refs.iter() {
         let this_beat = sm.notes[note_idx].beat;
-        let this_time = note_times[note_idx];
         let mut keep = true;
 
         //Check forward gap
@@ -72,15 +107,7 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
             .position(|note| !note.is_tail() && note.key >= 0 && note.beat > this_beat)
         {
             let next_note = note_idx + 1 + indices_to_next_note;
-            let gap = note_times[next_note] - this_time;
-            keep = gap >= min_dist;
-            trace!(
-                "        forward gap from {} - {}: {}s ({})",
-                note_idx,
-                next_note,
-                gap,
-                if keep { "keeping" } else { "removing" }
-            );
+            keep = are_far_enough(&sm.notes, note_idx, next_note);
         }
 
         //Check backward gap
@@ -91,15 +118,7 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
                 .position(|note| !note.is_tail() && note.key >= 0 && note.beat < this_beat)
             {
                 let prev_note = note_idx - 1 - indices_to_prev_note;
-                let gap = this_time - note_times[prev_note];
-                keep = gap >= min_dist;
-                trace!(
-                    "        backward gap from {} - {}: {}s ({})",
-                    note_idx,
-                    prev_note,
-                    gap,
-                    if keep { "keeping" } else { "removing" }
-                );
+                keep = are_far_enough(&sm.notes, prev_note, note_idx);
             }
         }
 
@@ -121,7 +140,7 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
     }
     //Actually remove notes
     sm.notes.retain(|note| note.key >= 0);
-    /*
+    //*
     //Sanity check
     let mut to_time = ToTime::new(sm);
     let mut last_time = 0.;
@@ -135,15 +154,31 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
         let time = to_time.beat_to_time(note.beat);
         if idx > 0 {
             let prev = &notes_without_tails[idx - 1];
-            let dist = (time - last_time).abs();
-            ensure!(
-                note.beat == prev.beat || dist >= min_dist,
-                "sanity check failed: notes at beats {} and {} are only {}s apart (should be at least {}s apart)",
-                prev.beat,
-                note.beat,
-                dist,
-                min_dist,
-            );
+            match conf.min_dist {
+                MinDist::Bpm(bpm) => {
+                    let min_dist = 60. / bpm;
+                    let dist = (time - last_time).abs();
+                    ensure!(
+                        note.beat == prev.beat || dist >= min_dist,
+                        "sanity check failed: notes at beats {} and {} are only {}s apart (should be at least {}s apart)",
+                        prev.beat,
+                        note.beat,
+                        dist,
+                        min_dist,
+                    );
+                }
+                MinDist::Beats(beats) => {
+                    let min_dist_beats = BeatPos::from(beats);
+                    ensure!(
+                        note.beat == prev.beat || note.beat - prev.beat >= min_dist_beats,
+                        "sanity check failed: notes at beats {} and {} are only {} beats apart (should be at least {} beats apart)",
+                        prev.beat,
+                        note.beat,
+                        note.beat-prev.beat,
+                        min_dist_beats,
+                    );
+                }
+            }
         }
         last_time = time;
     }

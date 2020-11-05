@@ -571,6 +571,11 @@ impl BeatPos {
         }
         den
     }
+
+    /// Check whether a beat is a multiple of the given beat.
+    pub fn is_aligned(self, align_to: BeatPos) -> bool {
+        self.frac % align_to.frac == 0
+    }
 }
 impl From<f64> for BeatPos {
     fn from(float: f64) -> BeatPos {

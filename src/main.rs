@@ -18,6 +18,7 @@ mod prelude {
     pub use rand_xoshiro::Xoshiro256Plus as FastRng;
     pub use serde::{Deserialize, Serialize};
     pub use std::{
+        borrow::Cow,
         cell::{Cell, RefCell},
         cmp,
         convert::{TryFrom, TryInto},
@@ -183,7 +184,10 @@ impl Default for Opts {
                 }
                 .into(),
                 transform::Filter {
-                    whitelist: vec![Gamemode::DanceSingle],
+                    ops: vec![(
+                        transform::Property::Gamemode,
+                        transform::FilterOp::Allow(vec!["DanceSingle".to_string()]),
+                    )],
                     ..default()
                 }
                 .into(),
@@ -384,7 +388,7 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
     }
     //Organize output simfiles
     let mut by_music: HashMap<PathBuf, Vec<Box<Simfile>>> = HashMap::default();
-    for sm in sm_store.take_output() {
+    for sm in sm_store.take_output()? {
         let list = by_music
             .entry(
                 AsRef::<Path>::as_ref(sm.music.as_ref().map(|p| p.as_os_str()).unwrap_or_default())
