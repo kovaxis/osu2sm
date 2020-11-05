@@ -212,7 +212,14 @@ pub(crate) fn convert<'a>(
             genre: String::new(),
             credit: bm.creator.clone(),
             banner: None,
-            background: Some(bm.background.clone().into()),
+            background: Some(
+                if ctx.opts.video && !bm.video.is_empty() {
+                    Some(bm.video.clone().into())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| bm.background.clone().into()),
+            ),
             lyrics: None,
             cdtitle: None,
             music: Some(bm.audio.clone().into()),

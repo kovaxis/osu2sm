@@ -25,6 +25,7 @@ pub struct Beatmap {
     pub slider_multiplier: f64,
     pub slider_tickrate: f64,
     pub background: String,
+    pub video: String,
     pub timing_points: Vec<TimingPoint>,
     pub hit_objects: Vec<HitObject>,
 }
@@ -52,6 +53,7 @@ impl Default for Beatmap {
             slider_multiplier: 1.,
             slider_tickrate: 1.,
             background: default(),
+            video: default(),
             timing_points: default(),
             hit_objects: default(),
         }
@@ -206,11 +208,16 @@ impl Beatmap {
                         Events => {
                             let mut comps = line.split(',');
                             match &get_component::<String, _>(&mut comps, "event type")?[..] {
-                                "0" | "1" | "Video" => {
+                                ty @ "0" | ty @ "1" | ty @ "Video" => {
                                     let _start_time: String =
                                         get_component(&mut comps, "start time")?;
                                     let filename: String = get_component(&mut comps, "filename")?;
-                                    bm.background = parse_filename(&filename);
+                                    let filename = parse_filename(&filename);
+                                    if ty == "0" {
+                                        bm.background = filename;
+                                    } else {
+                                        bm.video = filename;
+                                    }
                                 }
                                 _ => {}
                             }

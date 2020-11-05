@@ -120,6 +120,8 @@ struct Opts {
     unicode: bool,
     /// Whether to create a simple directory link to the input, and create the `.sm` files in-place.
     in_place: bool,
+    /// Whether to output videos or just use the static background.
+    video: bool,
     /// How to copy over audio and image files.
     copy: Vec<CopyMethod>,
     /// Whether to ignore incompatible-mode errors (there are too many and they are not terribly
@@ -183,6 +185,7 @@ impl Default for Opts {
             ],
             unicode: false,
             in_place: true,
+            video: true,
             copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
             ignore_mode_errors: true,
             offset: 0.,
