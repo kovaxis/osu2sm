@@ -43,14 +43,23 @@ impl SimfileStore {
     where
         F: FnMut(&mut SimfileStore, Vec<Box<Simfile>>) -> Result<()>,
     {
-        let name = bucket.unwrap_name();
+        let (name, take) = bucket.unwrap_resolved();
         if name.is_empty() {
             //Null bucket
+            trace!("    get null bucket");
             return Ok(());
         }
-        if let Some(list) = self.by_name.get(name) {
-            let list = list.clone();
-            visit(self, list)?;
+        if take {
+            if let Some(list) = self.by_name.remove(name) {
+                trace!("    take bucket \"{}\" ({} simfiles)", name, list.len());
+                visit(self, list)?;
+            }
+        } else {
+            if let Some(list) = self.by_name.get(name) {
+                let list = list.clone();
+                trace!("    get bucket \"{}\" ({} simfiles)", name, list.len());
+                visit(self, list)?;
+            }
         }
         Ok(())
     }
@@ -71,8 +80,10 @@ impl SimfileStore {
         let name = bucket.unwrap_name();
         if name.is_empty() {
             //Null bucket
+            trace!("    put {} simfiles in null bucket", simfiles.len());
             return;
         }
+        trace!("    put {} simfiles in bucket \"{}\"", simfiles.len(), name);
         self.by_name
             .entry(name.to_string())
             .or_default()
@@ -96,8 +107,13 @@ impl Default for BucketId {
 impl BucketId {
     #[track_caller]
     fn unwrap_name(&self) -> &str {
+        self.unwrap_resolved().0
+    }
+
+    #[track_caller]
+    fn unwrap_resolved(&self) -> (&str, bool) {
         match self {
-            BucketId::Resolved(name, _) => &name[..],
+            BucketId::Resolved(name, take) => (&name[..], *take),
             _ => panic!("transform i/o bucket not resolved: {:?}", self),
         }
     }
@@ -136,15 +152,19 @@ pub fn resolve_buckets(transforms: &mut Vec<Box<dyn Transform>>) -> Result<()> {
         next_id += 1;
         format!("~{}", next_id)
     };
+    //Process transforms and output them here
     let mut out_transforms = Vec::with_capacity(transforms.len());
+    //Keep track of the last auto-output, to bind it to any auto-input
     let mut last_magnetic_out = None;
     let in_transform_count = transforms.len();
     for (i, mut trans) in transforms.drain(..).enumerate() {
+        //The last transform has its output automatically bound to `~out`
         let mut magnetic_out = if i + 1 == in_transform_count {
             Some("~out".to_string())
         } else {
             None
         };
+        //Resolve each bucket
         for (kind, bucket) in trans.buckets_mut() {
             let name = match bucket {
                 BucketId::Auto => match kind {
@@ -170,9 +190,28 @@ pub fn resolve_buckets(transforms: &mut Vec<Box<dyn Transform>>) -> Result<()> {
             };
             *bucket = BucketId::Resolved(name, false);
         }
+        //Bookkeeping
         last_magnetic_out = magnetic_out;
         out_transforms.push(trans);
     }
+    //Optimize the last reads from each bucket, by taking the value instead of cloning it
+    let mut last_reads: HashMap<String, &mut BucketId> = default();
+    for trans in out_transforms.iter_mut() {
+        for (kind, bucket) in trans.buckets_mut() {
+            if kind.is_input() {
+                last_reads.insert(bucket.unwrap_name().to_string(), bucket);
+            }
+        }
+    }
+    for (_name, bucket) in last_reads {
+        match bucket {
+            BucketId::Resolved(_name, take) => {
+                *take = true;
+            }
+            _ => panic!("unresolved bucket"),
+        }
+    }
+    //Finally, write the output
     *transforms = out_transforms;
     Ok(())
 }

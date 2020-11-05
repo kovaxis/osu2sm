@@ -162,7 +162,7 @@ impl Default for Opts {
             stepmania_dir: None,
             gamemodes: {
                 use crate::simfile::Gamemode::*;
-                // Supported: 3K - 9K
+                // Supported: 3K - 10K
                 vec![
                     DanceThreepanel,
                     DanceSingle,
