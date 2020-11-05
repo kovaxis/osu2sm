@@ -7,7 +7,8 @@ pub(crate) fn convert<'a>(
     bmset_path: &Path,
     _bm_path: &Path,
     bm: Beatmap,
-) -> Result<SimfileList> {
+    mut out: impl FnMut(Box<Simfile>),
+) -> Result<()> {
     ensure!(
         bm.mode == osufile::MODE_MANIA,
         "mode not supported ({}) only mania (3) is currently supported",
@@ -186,15 +187,14 @@ pub(crate) fn convert<'a>(
         (len - bm.preview_start / 1000.).max(10.)
     };
     // Create the final SM file in all supported gamemodes
-    let gamemodes = ctx
+    for gamemode in ctx
         .opts
         .gamemodes
         .iter()
         .copied()
-        .filter(|gm| gm.key_count() == key_count as i32);
-    let mut out = Vec::with_capacity(gamemodes.clone().count());
-    for gamemode in gamemodes {
-        out.push(Box::new(Simfile {
+        .filter(|gm| gm.key_count() == key_count as i32)
+    {
+        out(Box::new(Simfile {
             title: if ctx.opts.unicode {
                 bm.title_unicode.clone()
             } else {
@@ -236,7 +236,7 @@ pub(crate) fn convert<'a>(
             notes: conv.out_notes.clone(),
         }));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Get the length of an audio file in seconds.

@@ -2,9 +2,10 @@ use crate::prelude::*;
 
 mod prelude {
     pub(crate) use crate::{
-        filter::Filter,
         osufile::{self, Beatmap, TimingPoint},
         simfile::{BeatPos, ControlPoint, Difficulty, Gamemode, Note, Simfile, ToTime},
+        simfile_rng,
+        transform::{ConcreteTransform, SimfileStore, Transform},
         Ctx,
     };
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
@@ -17,6 +18,7 @@ mod prelude {
     pub use rand_xoshiro::Xoshiro256Plus as FastRng;
     pub use serde::{Deserialize, Serialize};
     pub use std::{
+        cell::{Cell, RefCell},
         cmp,
         convert::{TryFrom, TryInto},
         ffi::{OsStr, OsString},
@@ -27,7 +29,6 @@ mod prelude {
         path::{Path, PathBuf},
         time::Instant,
     };
-    pub type SimfileList = Vec<Box<Simfile>>;
     pub use walkdir::WalkDir;
     pub fn default<T: Default>() -> T {
         T::default()
@@ -61,9 +62,9 @@ mod prelude {
 }
 
 mod conv;
-pub mod filter;
 pub mod osufile;
 pub mod simfile;
+pub mod transform;
 
 const OSU_AUTODETECT: BaseDirFinder = BaseDirFinder {
     base_files: &[
@@ -115,7 +116,7 @@ struct Opts {
     /// What gamemodes (keycounts) to convert compatible-keycount maps into.
     gamemodes: Vec<Gamemode>,
     /// Transformations to apply to converted simfiles before saving.
-    filters: Vec<Filter>,
+    transforms: Vec<ConcreteTransform>,
     /// Whether to output unicode names or use ASCII only.
     unicode: bool,
     /// Whether to create a simple directory link to the input, and create the `.sm` files in-place.
@@ -175,12 +176,18 @@ impl Default for Opts {
                     PnmNine,
                 ]
             },
-            filters: vec![
-                Filter::Convert(filter::Convert {
-                    into: vec![Gamemode::DanceSingle],
+            transforms: vec![
+                transform::Remap {
+                    gamemode: Gamemode::DanceSingle,
                     ..default()
-                }),
-                Filter::Whitelist(vec![Gamemode::DanceSingle]),
+                }
+                .into(),
+                transform::Filter {
+                    whitelist: vec![Gamemode::DanceSingle],
+                    ..default()
+                }
+                .into(),
+                transform::SimfileFix { ..default() }.into(),
             ],
             unicode: false,
             in_place: true,
@@ -228,6 +235,7 @@ impl Opts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DebugOpts {
     allow_chance: f64,
     allow_seed: u64,
@@ -235,6 +243,16 @@ pub struct DebugOpts {
     blacklist: Vec<String>,
     /// Entries must be lowercase.
     whitelist: Vec<String>,
+}
+impl Default for DebugOpts {
+    fn default() -> Self {
+        Self {
+            allow_chance: 1.,
+            allow_seed: 0,
+            blacklist: vec![],
+            whitelist: vec![],
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -246,6 +264,8 @@ enum CopyMethod {
 
 struct Ctx {
     opts: Opts,
+    sm_store: RefCell<SimfileStore>,
+    transforms: Vec<Box<dyn Transform>>,
 }
 
 fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()>) -> Result<()> {
@@ -316,61 +336,32 @@ fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()
     Ok(())
 }
 
-fn process_beatmap<'a>(ctx: &'a Ctx, bmset_path: &Path, bm_path: &Path) -> Result<SimfileList> {
+fn process_beatmap<'a>(
+    ctx: &'a Ctx,
+    bmset_path: &Path,
+    bm_path: &Path,
+    out: impl FnMut(Box<Simfile>),
+) -> Result<()> {
     let bm = Beatmap::parse(ctx.opts.offset, bm_path).context("read/parse beatmap file")?;
-    let sm = conv::convert(ctx, bmset_path, bm_path, bm)?;
-    Ok(sm)
+    conv::convert(ctx, bmset_path, bm_path, bm, out)?;
+    Ok(())
 }
 
 fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Result<()> {
     info!("processing \"{}\":", bmset_path.display());
     //Parse and convert beatmaps
-    let mut by_music: HashMap<PathBuf, HashMap<Gamemode, Vec<Box<Simfile>>>> = HashMap::default();
-    let mut total_sms = 0;
+    let mut flat_simfiles = Vec::new();
     for bm_path in bm_paths {
-        let result = process_beatmap(ctx, bmset_path, bm_path);
+        let old_simfile_count = flat_simfiles.len();
+        let result = process_beatmap(ctx, bmset_path, bm_path, |sm| flat_simfiles.push(sm));
         let bm_name = bm_path.file_name().unwrap_or_default().to_string_lossy();
         match result {
-            Ok(sms) => {
+            Ok(()) => {
                 debug!(
                     "  loaded beatmap \"{}\" successfully into {} simfiles",
                     bm_name,
-                    sms.len()
+                    flat_simfiles.len() as isize - old_simfile_count as isize,
                 );
-                //Apply filters
-                let mut sms = sms;
-                let mut out_sms = Vec::new();
-                trace!("  applying {} filters", ctx.opts.filters.len());
-                for filter in ctx.opts.filters.iter() {
-                    for mut sm in sms.drain(..) {
-                        match filter.apply(&mut *sm) {
-                            Ok((keep, append)) => {
-                                if keep {
-                                    out_sms.push(sm);
-                                }
-                                out_sms.extend(append);
-                            }
-                            Err(err) => {
-                                error!(
-                                    "  filter {:?} failed to process simfile: {:?}",
-                                    filter, err
-                                );
-                                out_sms.push(sm);
-                            }
-                        }
-                    }
-                    mem::swap(&mut sms, &mut out_sms);
-                    trace!("    filter {:?} resulted in {} simfiles", filter, sms.len());
-                }
-                //Add simfiles to simfile stash
-                for sm in sms {
-                    let by_gamemode = by_music
-                        .entry(sm.music.clone().unwrap_or_default())
-                        .or_default();
-                    let simfiles = by_gamemode.entry(sm.gamemode).or_default();
-                    simfiles.push(sm);
-                    total_sms += 1;
-                }
             }
             Err(err) => {
                 if !ctx.opts.ignore_mode_errors || !err.to_string().contains("mode not supported") {
@@ -378,6 +369,29 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
                 }
             }
         }
+    }
+    //Transform simfiles
+    let mut sm_store = ctx.sm_store.borrow_mut();
+    sm_store.reset(flat_simfiles);
+    for trans in ctx.transforms.iter() {
+        trace!("  applying transform {:?}", trans);
+        match trans.apply(&mut sm_store) {
+            Ok(()) => {}
+            Err(err) => {
+                error!("  transform {:?} failed to apply: {:#}", trans, err);
+            }
+        }
+    }
+    //Organize output simfiles
+    let mut by_music: HashMap<PathBuf, Vec<Box<Simfile>>> = HashMap::default();
+    for sm in sm_store.take_output() {
+        let list = by_music
+            .entry(
+                AsRef::<Path>::as_ref(sm.music.as_ref().map(|p| p.as_os_str()).unwrap_or_default())
+                    .to_path_buf(),
+            )
+            .or_default();
+        list.push(sm);
     }
     //Resolve output folder
     let out_base = if ctx.opts.in_place {
@@ -411,7 +425,7 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         }
     }
     //Write output simfiles
-    if total_sms > 0 {
+    if !by_music.is_empty() {
         //Create base output folder
         if !ctx.opts.in_place {
             fs::create_dir_all(&out_base)
@@ -419,32 +433,20 @@ fn process_beatmapset(ctx: &Ctx, bmset_path: &Path, bm_paths: &[PathBuf]) -> Res
         }
         //Do not copy files twice
         let mut already_copied: HashSet<PathBuf> = HashSet::default();
-        for (audio_name, mut by_gamemode) in by_music.into_iter() {
-            //Solve difficulty conflicts to flatten everything into one large simfile array
-            for (_gamemode, sms) in by_gamemode.iter_mut() {
-                Simfile::spread_difficulties(sms)?;
-            }
-            let mut flat_simfiles: Vec<Simfile> = by_gamemode
-                .into_iter()
-                .flat_map(|(_gamemode, sms)| sms.into_iter().map(|boxed| *boxed))
-                .collect();
+        for (audio_name, sms) in by_music.into_iter() {
             //Decide the output filename
             let filename = format!(
                 "osu2sm-{}.sm",
                 audio_name.file_stem().unwrap_or_default().to_string_lossy()
             );
             let out_path: PathBuf = out_base.join(&filename);
-            //Fix simfiles before writing
-            for sm in flat_simfiles.iter_mut() {
-                sm.fix()?;
-            }
             //Write simfile
             debug!("  writing simfile to \"{}\"", out_path.display());
-            Simfile::save(&out_path, &flat_simfiles)
+            Simfile::save(&out_path, sms.iter().map(|sm| &**sm))
                 .with_context(|| anyhow!("write simfile to \"{}\"", out_path.display()))?;
             //Copy over dependencies (backgrounds, audio, etc...)
             if !ctx.opts.in_place {
-                for sm in flat_simfiles.iter() {
+                for sm in sms.iter() {
                     for dep_name in sm.file_deps() {
                         if already_copied.contains(dep_name) {
                             continue;
@@ -677,6 +679,11 @@ fn read_path_from_stdin() -> Result<PathBuf> {
     Ok(path.into())
 }
 
+fn simfile_rng(sm: &Simfile, name: &str) -> FastRng {
+    let seed = fxhash::hash64(&(&sm.music, &sm.title_trans, &sm.desc, name));
+    FastRng::seed_from_u64(seed)
+}
+
 fn run() -> Result<()> {
     let load_cfg_from = std::env::args_os()
         .skip(1)
@@ -780,7 +787,16 @@ fn run() -> Result<()> {
             }
         }
     }
-    let mut ctx = Ctx { opts };
+    let mut ctx = Ctx {
+        sm_store: RefCell::new(default()),
+        transforms: opts
+            .transforms
+            .drain(..)
+            .map(|trans| trans.into_dyn())
+            .collect(),
+        opts,
+    };
+    transform::resolve_buckets(&mut ctx.transforms).context("failed to resolve transforms")?;
     info!("scanning for beatmaps in \"{}\"", ctx.opts.input.display());
     info!("outputting simfiles in \"{}\"", ctx.opts.output.display());
     if ctx.opts.in_place {

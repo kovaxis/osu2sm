@@ -2,15 +2,8 @@
 
 use crate::prelude::*;
 
+/// Forced to be 4 by the godlike simfile format.
 const BEATS_IN_MEASURE: i32 = 4;
-const AVAILABLE_DIFFICULTIES: &[Difficulty] = &[
-    Difficulty::Beginner,
-    Difficulty::Easy,
-    Difficulty::Medium,
-    Difficulty::Hard,
-    Difficulty::Challenge,
-    Difficulty::Edit,
-];
 
 #[derive(Debug, Clone)]
 pub struct Simfile {
@@ -40,9 +33,9 @@ pub struct Simfile {
     pub notes: Vec<Note>,
 }
 impl Simfile {
-    pub fn save(path: &Path, simfiles: &[Simfile]) -> Result<()> {
-        ensure!(!simfiles.is_empty(), "zero simfiles supplied");
-        let main_sm = &simfiles[0];
+    pub fn save<'a>(path: &Path, simfiles: impl IntoIterator<Item = &'a Simfile>) -> Result<()> {
+        let mut simfiles = simfiles.into_iter();
+        let main_sm = simfiles.next().ok_or(anyhow!("zero simfiles supplied"))?;
         let mut file = BufWriter::new(File::create(path).context("create file")?);
         fn as_utf8<'a>(path: &'a Option<PathBuf>, name: &str) -> Result<&'a str> {
             path.as_deref()
@@ -113,7 +106,7 @@ impl Simfile {
                 bpms
             },
         )?;
-        for sm in simfiles {
+        for sm in iter::once(main_sm).chain(simfiles) {
             write!(
                 file,
                 r#"
@@ -149,164 +142,6 @@ impl Simfile {
             .chain(self.music.as_deref().into_iter())
     }
 
-    /// There seems to be a max of 6 difficulties, so use them wisely and sort them.
-    pub fn spread_difficulties(simfiles: &mut Vec<Box<Simfile>>) -> Result<()> {
-        //Create an auxiliary vec holding chart indices and difficulties
-        let mut order = simfiles
-            .iter()
-            .enumerate()
-            .map(|(idx, sm)| (idx, sm.difficulty()))
-            .collect::<Vec<_>>();
-        trace!("    raw difficulties: {:?}", order);
-
-        //Sort by difficulty
-        order.sort_by_key(|(_, d)| SortableFloat(*d));
-        trace!("    sorted difficulties: {:?}", order);
-
-        //Remove difficulties, mantaining as much spread as possible
-        while order.len() > AVAILABLE_DIFFICULTIES.len() {
-            //Find the smallest gap
-            let (mut smallest, _) = order
-                .windows(2)
-                .enumerate()
-                .min_by_key(|(_idx, window)| SortableFloat(window[1].1 - window[0].1))
-                .unwrap();
-            let get_gap_before = |idx: usize| {
-                if idx <= 0 || idx >= order.len() {
-                    99999.
-                } else {
-                    order[idx].1 - order[idx - 1].1
-                }
-            };
-            if get_gap_before(smallest) > get_gap_before(smallest + 2) {
-                smallest += 1;
-            }
-            //Remove this chart :(
-            order.remove(smallest);
-        }
-        trace!("    with conflicts resolved: {:?}", order);
-
-        //Reorder charts
-        for chart in simfiles.iter_mut() {
-            chart.difficulty_num = 0. / 0.;
-        }
-        for (idx, diff) in order.iter() {
-            simfiles[*idx].difficulty_num = *diff;
-        }
-        simfiles.retain(|chart| !chart.difficulty_num.is_nan());
-        simfiles.sort_by_key(|chart| SortableFloat(chart.difficulty_num));
-        trace!(
-            "    final chart difficulties: {:?}",
-            simfiles
-                .iter()
-                .map(|chart| chart.difficulty_num)
-                .collect::<Vec<_>>()
-        );
-
-        //Reassign difficulty names from numbers
-        let mut difficulties = simfiles
-            .iter()
-            .map(|chart| {
-                let (diff, _d) = AVAILABLE_DIFFICULTIES
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_i, diff)| {
-                        SortableFloat((diff.numeric() - chart.difficulty_num).abs())
-                    })
-                    .unwrap();
-                diff as isize
-            })
-            .collect::<Vec<_>>();
-        trace!("    diff indices: {:?}", difficulties);
-
-        //Resolve conflicts
-        loop {
-            let mut conflict = None;
-            for (i, window) in difficulties.windows(2).enumerate() {
-                if window[1] == window[0] {
-                    //Conflict
-                    //See which way is the conflict solved faster
-                    let direction_cost = |idx: usize, dir: isize| {
-                        let mut idx = idx as isize;
-                        let mut occupied_if = difficulties[idx as usize];
-                        let mut cost = 0.;
-                        while occupied_if >= 0
-                            && occupied_if < AVAILABLE_DIFFICULTIES.len() as isize
-                            && idx >= 0
-                            && idx < difficulties.len() as isize
-                        {
-                            if (difficulties[idx as usize] - occupied_if) * dir <= 0 {
-                                idx += dir;
-                                occupied_if += dir;
-                                cost += 1.;
-                            } else {
-                                break;
-                            }
-                        }
-                        if occupied_if < 0 || occupied_if >= AVAILABLE_DIFFICULTIES.len() as isize {
-                            //Saturated. Max cost
-                            9999.
-                        } else {
-                            cost
-                        }
-                    };
-                    trace!("    conflict on {} - {}", i, i + 1);
-                    if direction_cost(i, -1) < direction_cost(i + 1, 1) {
-                        //Solve to the left
-                        conflict = Some((i, -1));
-                    } else {
-                        //Solve to the right
-                        conflict = Some((i + 1, 1));
-                    }
-                    break;
-                }
-            }
-
-            match conflict {
-                Some((idx, dir)) => {
-                    let mut idx = idx as isize;
-                    trace!("      solving on idx {}, direction {}", idx, dir);
-                    let mut set_to = difficulties[idx as usize] + dir;
-                    while idx >= 0
-                        && idx < difficulties.len() as isize
-                        && (difficulties[idx as usize] - set_to) * dir <= 0
-                    {
-                        set_to = set_to.min(AVAILABLE_DIFFICULTIES.len() as isize - 1).max(0);
-                        trace!(
-                            "      moving difficulties[{}] == {} -> {}",
-                            idx,
-                            difficulties[idx as usize],
-                            set_to
-                        );
-                        difficulties[idx as usize] = set_to;
-                        idx += dir;
-                        set_to += dir;
-                    }
-                }
-                None => break,
-            }
-        }
-        trace!(
-            "    diff indices with conflicts resolved: {:?}",
-            difficulties
-        );
-
-        //Convert back from difficulty indices to actual difficulties
-        for (chart, diff_idx) in simfiles.iter_mut().zip(difficulties) {
-            chart.difficulty = AVAILABLE_DIFFICULTIES[diff_idx as usize];
-            chart.difficulty_num = chart.difficulty_num.round();
-        }
-        trace!(
-            "    final chart difficulties: {:?}",
-            simfiles
-                .iter()
-                .map(|chart| format!("{} ({})", chart.difficulty.name(), chart.difficulty_num))
-                .collect::<Vec<_>>()
-        );
-
-        Ok(())
-    }
-
     /// Get the estimated difficulty of a certain chart.
     pub fn difficulty(&self) -> f64 {
         fn adapt_range(src: (f64, f64), dst: (f64, f64), val: f64) -> f64 {
@@ -323,7 +158,7 @@ impl Simfile {
     /// In order to fix this, if there is a tail and afterwards at the exact same beat and key
     /// there is another note, the tail is moved back a little.
     /// Note that this requires sorting the notes if any is moved.
-    pub fn fix(&mut self) -> Result<()> {
+    pub fn fix_tails(&mut self) -> Result<()> {
         let mut cur_beat = BeatPos::from(0.);
         let mut cur_beat_first_note = 0;
         for i in 0..self.notes.len() {
@@ -656,7 +491,7 @@ impl Gamemode {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Difficulty {
     Beginner,
     Easy,
@@ -675,18 +510,6 @@ impl Difficulty {
             Hard => "Hard",
             Challenge => "Challenge",
             Edit => "Edit",
-        }
-    }
-
-    fn numeric(&self) -> f64 {
-        use Difficulty::*;
-        match self {
-            Beginner => 1.,
-            Easy => 2.,
-            Medium => 3.5,
-            Hard => 5.,
-            Challenge => 6.5,
-            Edit => 8.,
         }
     }
 }
