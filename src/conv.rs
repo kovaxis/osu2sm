@@ -33,6 +33,7 @@ pub(crate) fn convert<'a>(
         next_idx: usize,
         cur_tp: TimingPoint,
         cur_beat: BeatPos,
+        cur_beat_nonapproxed: f64,
         timing_points: &'a [TimingPoint],
         out_bpms: Vec<ControlPoint>,
         out_notes: Vec<Note>,
@@ -40,7 +41,8 @@ pub(crate) fn convert<'a>(
     let mut conv = ConvCtx {
         next_idx: 1,
         cur_tp: first_tp.clone(),
-        cur_beat: BeatPos::from_float(0.),
+        cur_beat: BeatPos::from(0.),
+        cur_beat_nonapproxed: 0.,
         timing_points: &bm.timing_points[..],
         out_bpms: Vec::new(),
         out_notes: Vec::new(),
@@ -55,8 +57,10 @@ pub(crate) fn convert<'a>(
                 //Skip inherited timing points
             } else if time >= next_tp.time {
                 //Advance to this timing point
-                let adv_beat_nonscaled = (next_tp.time - conv.cur_tp.time) / conv.cur_tp.beat_len;
-                conv.cur_beat = conv.cur_beat + BeatPos::from_float(adv_beat_nonscaled);
+                conv.cur_beat_nonapproxed +=
+                    (next_tp.time - conv.cur_tp.time) / conv.cur_tp.beat_len;
+                //Arbitrary round-to-beat because of broken beatmaps
+                conv.cur_beat = BeatPos::from(conv.cur_beat_nonapproxed).round(2);
                 conv.cur_tp = next_tp.clone();
                 conv.out_bpms.push(ControlPoint {
                     beat: conv.cur_beat,
@@ -69,7 +73,7 @@ pub(crate) fn convert<'a>(
             conv.next_idx += 1;
         }
         //Use the current timing point to determine note beat
-        conv.cur_beat + BeatPos::from_float((time - conv.cur_tp.time) / conv.cur_tp.beat_len)
+        conv.cur_beat + BeatPos::from((time - conv.cur_tp.time) / conv.cur_tp.beat_len)
     }
     // Adjust for hit objects that occur before the first timing point by adding another timing
     // point even earlier.
@@ -79,7 +83,7 @@ pub(crate) fn convert<'a>(
         }
         conv.cur_tp = first_tp.clone();
         conv.out_bpms.push(ControlPoint {
-            beat: BeatPos::from_float(0.),
+            beat: BeatPos::from(0.),
             beat_len: first_tp.beat_len / 1000.,
         });
     }

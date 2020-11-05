@@ -108,7 +108,7 @@ impl Simfile {
                     } else {
                         bpms.push(',');
                     }
-                    write!(bpms, "{}={}", point.beat.as_float(), point.bpm()).unwrap();
+                    write!(bpms, "{}={}", point.beat.as_num(), point.bpm()).unwrap();
                 }
                 bpms
             },
@@ -324,7 +324,7 @@ impl Simfile {
     /// there is another note, the tail is moved back a little.
     /// Note that this requires sorting the notes if any is moved.
     pub fn fix(&mut self) -> Result<()> {
-        let mut cur_beat = BeatPos::from_float(0.);
+        let mut cur_beat = BeatPos::from(0.);
         let mut cur_beat_first_note = 0;
         for i in 0..self.notes.len() {
             let note = &self.notes[i];
@@ -339,7 +339,7 @@ impl Simfile {
                     .any(|next_n| next_n.key == note.key)
                 {
                     //Move back by the smallest beat unit, and to the previous beat
-                    self.notes[i].beat -= BeatPos { frac: 1 };
+                    self.notes[i].beat -= BeatPos::EPSILON;
                     self.notes[cur_beat_first_note..i + 1].rotate_right(1);
                 }
             }
@@ -376,7 +376,7 @@ fn write_measure(
         for note in notes {
             let rel_pos = note.beat - measure_start;
             ensure!(
-                rel_pos >= BeatPos::from_float(0.),
+                rel_pos >= BeatPos::from(0.),
                 "handed a note that starts before the measure start ({} < {})",
                 note.beat,
                 measure_start
@@ -441,11 +441,11 @@ fn write_notedata(file: &mut impl Write, sm: &Simfile) -> Result<()> {
     let mut measure_counter = 0;
     let mut cur_measure = CurMeasure {
         first_note: 0,
-        start_beat: BeatPos::from_float(0.),
+        start_beat: BeatPos::from(0.),
     };
     for (note_idx, note) in sm.notes.iter().enumerate() {
         //Finish any pending measures
-        while (note.beat - cur_measure.start_beat) >= BeatPos::from_float(BEATS_IN_MEASURE as f64) {
+        while (note.beat - cur_measure.start_beat) >= BeatPos::from(BEATS_IN_MEASURE as f64) {
             write_measure(
                 file,
                 key_count,
@@ -456,7 +456,7 @@ fn write_notedata(file: &mut impl Write, sm: &Simfile) -> Result<()> {
             measure_counter += 1;
             cur_measure.first_note = note_idx;
             cur_measure.start_beat =
-                cur_measure.start_beat + BeatPos::from_float(BEATS_IN_MEASURE as f64);
+                cur_measure.start_beat + BeatPos::from(BEATS_IN_MEASURE as f64);
         }
     }
     //Finish the last pending measure
@@ -698,15 +698,29 @@ pub struct BeatPos {
 }
 impl BeatPos {
     const FIXED_POINT: i32 = 48;
+    pub const EPSILON: BeatPos = BeatPos { frac: 1 };
 
-    pub fn from_float(float: f64) -> BeatPos {
+    pub fn as_num(self) -> f64 {
+        self.into()
+    }
+
+    pub fn round(mut self, divisions: i32) -> Self {
+        let round_to = Self::FIXED_POINT / divisions;
+        self.frac += round_to / 2;
+        self.frac -= self.frac % round_to;
+        self
+    }
+}
+impl From<f64> for BeatPos {
+    fn from(float: f64) -> BeatPos {
         Self {
             frac: (float * Self::FIXED_POINT as f64).round() as i32,
         }
     }
-
-    pub fn as_float(&self) -> f64 {
-        self.frac as f64 / Self::FIXED_POINT as f64
+}
+impl From<BeatPos> for f64 {
+    fn from(beat: BeatPos) -> f64 {
+        beat.frac as f64 / BeatPos::FIXED_POINT as f64
     }
 }
 impl ops::AddAssign for BeatPos {
@@ -735,7 +749,7 @@ impl ops::Sub for BeatPos {
 }
 impl fmt::Display for BeatPos {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "BeatPos({} beats)", self.as_float())
+        write!(f, "{}", self.as_num())
     }
 }
 
@@ -800,7 +814,7 @@ impl ToTime<'_> {
             let next_bpm = &self.bpms[self.cur_idx + 1];
             if beat >= next_bpm.beat {
                 //Advance to this control point
-                let adv_time = (next_bpm.beat - cur_bpm.beat).as_float() * cur_bpm.beat_len;
+                let adv_time = (next_bpm.beat - cur_bpm.beat).as_num() * cur_bpm.beat_len;
                 self.cur_time += adv_time;
                 self.cur_idx += 1;
             } else {
@@ -810,6 +824,6 @@ impl ToTime<'_> {
         }
         //Use the current control point to determine the time corresponding to this beat
         let cur_bpm = &self.bpms[self.cur_idx];
-        self.cur_time + (beat - cur_bpm.beat).as_float() * cur_bpm.beat_len
+        self.cur_time + (beat - cur_bpm.beat).as_num() * cur_bpm.beat_len
     }
 }

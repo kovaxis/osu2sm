@@ -137,6 +137,9 @@ struct Opts {
     log_stderr: bool,
     /// Enable logging to stdout.
     log_stdout: bool,
+    /// Do a random trim of input beatmaps, for debug purposes.
+    /// If `Some`, uses the given chance of allowing a beatmap and the given random seed.
+    debug: Option<DebugOpts>,
     /// Query the length of the audio files in order to create an accurate preview range.
     /// However, querying the length of an audio file can take quite some time, so disable for
     /// speed.
@@ -171,9 +174,10 @@ impl Default for Opts {
                 ]
             },
             filters: vec![
-                Filter::ConvertTo(filter::ConvertTo {
+                Filter::Convert(filter::Convert {
                     into: vec![Gamemode::DanceSingle],
-                    keep_original: false,
+                    avoid_shuffle: true,
+                    weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
                 }),
                 Filter::Whitelist(vec![Gamemode::DanceSingle]),
             ],
@@ -186,6 +190,7 @@ impl Default for Opts {
             log_file: true,
             log_stderr: true,
             log_stdout: false,
+            debug: None,
             query_audio_len: true,
             cleanup: false,
         }
@@ -220,6 +225,16 @@ impl Opts {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugOpts {
+    allow_chance: f64,
+    allow_seed: u64,
+    /// Entries must be lowercase.
+    blacklist: Vec<String>,
+    /// Entries must be lowercase.
+    whitelist: Vec<String>,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 enum CopyMethod {
     Hardlink,
@@ -233,12 +248,42 @@ struct Ctx {
 
 fn get_songs(ctx: &Ctx, mut on_bmset: impl FnMut(&Path, &[PathBuf]) -> Result<()>) -> Result<()> {
     let mut by_depth: Vec<Vec<PathBuf>> = Vec::new();
+    let mut randtrim = ctx
+        .opts
+        .debug
+        .as_ref()
+        .filter(|dbg| dbg.allow_chance < 1.)
+        .map(|dbg| (dbg.allow_chance, FastRng::seed_from_u64(dbg.allow_seed)));
     for entry in WalkDir::new(&ctx.opts.input).contents_first(true) {
         let entry = entry.context("failed to scan input directory")?;
         let depth = entry.depth();
         if depth < by_depth.len() {
             //Close directories
             for dir in by_depth.drain(depth..) {
+                if let Some((chance, rng)) = &mut randtrim {
+                    if !rng.gen_bool(*chance) {
+                        continue;
+                    }
+                }
+                if let Some(dbg) = ctx.opts.debug.as_ref() {
+                    let path = entry
+                        .path()
+                        .strip_prefix(&ctx.opts.input)
+                        .ok()
+                        .and_then(Path::to_str)
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if dbg.blacklist.iter().any(|black| path.contains(black)) {
+                        //Path contains blacklisted keywords
+                        continue;
+                    }
+                    if !dbg.whitelist.is_empty()
+                        && !dbg.whitelist.iter().any(|white| path.contains(white))
+                    {
+                        //Path is not whitelisted
+                        continue;
+                    }
+                }
                 if !dir.is_empty() {
                     if let Err(e) = on_bmset(entry.path(), &dir[..]) {
                         warn!(
@@ -771,6 +816,6 @@ fn main() {
             error!("fatal error: {:#}", err);
         }
     }
-    eprintln!("hit enter to close the program");
+    eprintln!("hit enter to close this window");
     let _ = std::io::stdin().read_line(&mut String::new());
 }
