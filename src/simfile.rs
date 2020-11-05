@@ -132,6 +132,7 @@ impl Simfile {
         Ok(())
     }
 
+    /// Get the files that this simfile references.
     pub fn file_deps(&self) -> impl Iterator<Item = &Path> {
         self.banner
             .as_deref()
@@ -142,8 +143,30 @@ impl Simfile {
             .chain(self.music.as_deref().into_iter())
     }
 
-    /// Get the estimated difficulty of a certain chart.
-    pub fn difficulty(&self) -> f64 {
+    /// Iterate over the populated beats in a simfile.
+    pub fn iter_beats<'a>(&'a self) -> impl Iterator<Item = (BeatPos, usize, usize)> + 'a {
+        let mut next_idx = 0;
+        iter::from_fn(move || {
+            if next_idx >= self.notes.len() {
+                return None;
+            }
+            let beat_start = next_idx;
+            let cur_beat = self.notes[beat_start].beat;
+            while next_idx < self.notes.len() && self.notes[next_idx].beat == cur_beat {
+                next_idx += 1;
+            }
+            let beat_end = next_idx;
+            Some((cur_beat, beat_start, beat_end))
+        })
+    }
+
+    /// Get a helper type useful for getting monotonically increasing times from beats.
+    pub fn beat_to_time(&self) -> ToTime {
+        ToTime::new(self)
+    }
+
+    /// Naive difficulty calculation.
+    pub fn difficulty_naive(&self) -> f64 {
         fn adapt_range(src: (f64, f64), dst: (f64, f64), val: f64) -> f64 {
             dst.0 + (val - src.0) / (src.1 - src.0) * (dst.1 - dst.0)
         }

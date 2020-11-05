@@ -3,7 +3,12 @@
 use crate::transform::prelude::*;
 
 pub use crate::transform::{
-    filter::Filter, pipe::Pipe, remap::Remap, simfilefix::SimfileFix, simultaneous::Simultaneous,
+    analyze::{Analyze, AnalyzeDifficulty},
+    filter::Filter,
+    pipe::Pipe,
+    remap::Remap,
+    simfilefix::SimfileFix,
+    simultaneous::Simultaneous,
     snap::Snap,
 };
 
@@ -17,6 +22,7 @@ mod prelude {
     };
 }
 
+mod analyze;
 mod filter;
 mod pipe;
 mod remap;
@@ -303,4 +309,4 @@ macro_rules! make_concrete {
     };
 }
 
-make_concrete!(Pipe, Filter, Remap, Simultaneous, Snap, SimfileFix,);
+make_concrete!(Pipe, Filter, Remap, Simultaneous, Snap, SimfileFix, Analyze,);

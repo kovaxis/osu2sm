@@ -1,12 +1,22 @@
 use crate::transform::prelude::*;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Filter {
     pub from: BucketId,
     pub into: BucketId,
     pub whitelist: Vec<Gamemode>,
     pub blacklist: Vec<Gamemode>,
+}
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            from: default(),
+            into: default(),
+            whitelist: vec![],
+            blacklist: vec![],
+        }
+    }
 }
 
 impl Transform for Filter {

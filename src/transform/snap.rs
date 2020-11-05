@@ -121,6 +121,7 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
     }
     //Actually remove notes
     sm.notes.retain(|note| note.key >= 0);
+    /*
     //Sanity check
     let mut to_time = ToTime::new(sm);
     let mut last_time = 0.;
@@ -146,5 +147,6 @@ fn snap(sm: &mut Simfile, conf: &Snap) -> Result<()> {
         }
         last_time = time;
     }
+    // */
     Ok(())
 }

@@ -77,8 +77,14 @@ pub fn spread_difficulties(conf: &SimfileFix, simfiles: &mut Vec<Box<Simfile>>) 
     //Create an auxiliary vec holding chart indices and difficulties
     let mut order = simfiles
         .iter()
+        .map(|sm| {
+            if sm.difficulty_num.is_finite() && sm.difficulty_num > 0. {
+                sm.difficulty_num
+            } else {
+                sm.difficulty_naive()
+            }
+        })
         .enumerate()
-        .map(|(idx, sm)| (idx, sm.difficulty()))
         .collect::<Vec<_>>();
     trace!("    raw difficulties: {:?}", order);
 
