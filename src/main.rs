@@ -738,7 +738,7 @@ fn run() -> Result<()> {
                 );
                 debug!("  songs dir at \"{}\"", main.display());
                 opts.osu_dir.get_or_insert(base);
-                if opts.fix_input {
+                if opts.fix_input && opts.input != main {
                     info!(
                         "fixed input path: \"{}\" -> \"{}\"",
                         opts.input.display(),
@@ -767,7 +767,7 @@ fn run() -> Result<()> {
                 );
                 debug!("  songs dir at \"{}\"", main.display());
                 opts.stepmania_dir.get_or_insert(base);
-                if opts.fix_output {
+                if opts.fix_output && opts.output != main {
                     info!(
                         "fixed output path: \"{}\" -> \"{}\"",
                         opts.output.display(),
