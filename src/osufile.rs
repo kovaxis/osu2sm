@@ -133,7 +133,7 @@ impl Beatmap {
 
         let mut errors = Vec::new();
         let mut requires_sort = false;
-        let mut last_time = -1. / 0.;
+        let mut last_time = f64::NEG_INFINITY;
         for line in lines {
             let line = line?;
             line_num += 1;

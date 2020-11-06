@@ -10,7 +10,6 @@
 - Consider making osu! loader and simfile writer themselves a transform, and remove global `~in`
     and `~out`.
 - Use `bumpalo` for fastness.
-- Add true snap.
-- Set difficulty number from in-practice BPM.
-- Add `Chain` bucket.
-- Optimize `get_each` and add a `take_each`.
+- Optimize `get_each` and add a `take_each`, to take advantage of the fact that simfiles are
+    already stored linearly by default. Perhaps use `&mut Vec` everywhere instead of `Vec`
+    everywhere, to actually take advantage of storing things lineary.

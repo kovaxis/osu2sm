@@ -2,6 +2,7 @@ use crate::prelude::*;
 
 mod prelude {
     pub(crate) use crate::{
+        linear_map,
         osufile::{self, Beatmap, TimingPoint},
         simfile::{BeatPos, ControlPoint, Difficulty, Gamemode, Note, Simfile, ToTime},
         simfile_rng,
@@ -686,6 +687,11 @@ fn read_path_from_stdin() -> Result<PathBuf> {
 fn simfile_rng(sm: &Simfile, name: &str) -> FastRng {
     let seed = fxhash::hash64(&(&sm.music, &sm.title_trans, &sm.desc, name));
     FastRng::seed_from_u64(seed)
+}
+
+fn linear_map(in_min: f64, in_max: f64, out_min: f64, out_max: f64) -> impl Fn(f64) -> f64 {
+    let m = (out_max - out_min) / (in_max - in_min);
+    move |input| (input - in_min) * m + out_min
 }
 
 fn run() -> Result<()> {

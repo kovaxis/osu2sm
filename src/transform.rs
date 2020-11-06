@@ -4,9 +4,9 @@ use crate::transform::prelude::*;
 
 pub use crate::transform::{
     align::Align,
-    analyze::{Analyze, AnalyzeDifficulty},
     filter::{Filter, FilterOp, Property},
     pipe::Pipe,
+    rate::{Rate, RateMethod},
     remap::Remap,
     simfilefix::SimfileFix,
     simultaneous::Simultaneous,
@@ -30,9 +30,9 @@ mod prelude {
 }
 
 mod align;
-mod analyze;
 mod filter;
 mod pipe;
+mod rate;
 mod remap;
 mod simfilefix;
 mod simultaneous;
@@ -374,6 +374,6 @@ make_concrete!(
     Simultaneous,
     Align,
     SimfileFix,
-    Analyze,
+    Rate,
     Space,
 );

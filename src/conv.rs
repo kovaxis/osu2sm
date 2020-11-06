@@ -90,7 +90,7 @@ pub(crate) fn convert<'a>(
     }
     // Add hit objects as measure objects, pushing out SM notedata on the fly.
     let mut pending_tails = Vec::new();
-    let mut last_time = -1. / 0.;
+    let mut last_time = f64::NEG_INFINITY;
     for obj in bm.hit_objects.iter() {
         //Ensure objects increase monotonically in time
         ensure!(
@@ -231,7 +231,7 @@ pub(crate) fn convert<'a>(
             gamemode,
             desc: bm.version.clone(),
             difficulty: Difficulty::Edit,
-            difficulty_num: 0.,
+            difficulty_num: f64::NAN,
             radar: [0., 0., 0., 0., 0.],
             notes: conv.out_notes.clone(),
         }));

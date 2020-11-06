@@ -119,7 +119,7 @@ impl Simfile {
                 gamemode = sm.gamemode.id(),
                 desc = sm.desc,
                 diff_name = sm.difficulty.name(),
-                diff_num = sm.difficulty_num,
+                diff_num = sm.difficulty_num.round(),
                 radar0 = sm.radar[0],
                 radar1 = sm.radar[1],
                 radar2 = sm.radar[2],
