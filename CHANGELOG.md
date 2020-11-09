@@ -9,5 +9,4 @@
 - Abort parsing quickly if osu! gamemode or keycount is not compatible.
 - Use `bumpalo` for fastness.
 - Optimize `get_each` and add a `take_each`, to take advantage of the fact that simfiles are
-    already stored linearly by default. Perhaps use `&mut Vec` everywhere instead of `Vec`
-    everywhere, to actually take advantage of storing things lineary.
+    already stored linearly by default.

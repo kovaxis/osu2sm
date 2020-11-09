@@ -212,7 +212,9 @@ impl Node for SimfileFix {
             }
             Ok(())
         } else {
-            store.get(&self.from, process_list)
+            store.get(&self.from, |store, list| {
+                process_list(store, mem::replace(list, default()))
+            })
         }
     }
     fn buckets_mut<'a>(&'a mut self) -> BucketIter<'a> {

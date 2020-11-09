@@ -26,11 +26,11 @@ impl Default for Remap {
 
 impl Node for Remap {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
-        store.get(&self.from, |store, mut list| {
+        store.get(&self.from, |store, list| {
             for sm in list.iter_mut() {
                 convert(sm, self)?;
             }
-            store.put(&self.into, list);
+            store.put(&self.into, mem::replace(list, default()));
             Ok(())
         })
     }

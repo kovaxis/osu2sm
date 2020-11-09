@@ -25,7 +25,7 @@ impl Node for Pipe {
             let mut merged = Vec::new();
             store.get(&self.from, |_, mut list| {
                 if merged.is_empty() {
-                    merged = list;
+                    mem::swap(&mut merged, list);
                 } else {
                     merged.append(&mut list);
                 }
@@ -35,7 +35,7 @@ impl Node for Pipe {
             Ok(())
         } else {
             store.get(&self.from, |store, list| {
-                store.put(&self.into, list);
+                store.put(&self.into, mem::replace(list, default()));
                 Ok(())
             })
         }

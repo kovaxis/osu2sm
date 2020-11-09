@@ -52,22 +52,27 @@ struct Bucket {
 impl Bucket {
     fn take_lists<'a>(
         &'a mut self,
-        mut consume: impl FnMut(Vec<Box<Simfile>>) -> Result<()>,
+        tmp_vec: &mut Vec<Box<Simfile>>,
+        mut consume: impl FnMut(&mut Vec<Box<Simfile>>) -> Result<()>,
     ) -> Result<()> {
         let mut flat_simfiles = mem::replace(&mut self.simfiles, default());
         if self.lists.is_empty() {
             return Ok(());
         }
         for start_idx in self.lists.drain(..).rev().skip(1) {
-            consume(flat_simfiles.drain(start_idx..).collect())?;
+            tmp_vec.clear();
+            tmp_vec.extend(flat_simfiles.drain(start_idx..));
+            consume(tmp_vec)?;
         }
-        consume(flat_simfiles)?;
+        consume(&mut flat_simfiles)?;
         Ok(())
     }
 
-    fn put_list(&mut self, list: impl IntoIterator<Item = Box<Simfile>>) {
+    fn put_list(&mut self, list: impl IntoIterator<Item = Box<Simfile>>) -> usize {
+        let old_len = self.simfiles.len();
         self.simfiles.extend(list);
         self.lists.push(self.simfiles.len());
+        self.simfiles.len() - old_len
     }
 }
 impl fmt::Debug for Bucket {
@@ -97,6 +102,7 @@ impl fmt::Debug for Bucket {
 pub struct SimfileStore {
     by_name: HashMap<String, Bucket>,
     globals: HashMap<String, String>,
+    tmp_vec: Vec<Box<Simfile>>,
 }
 impl SimfileStore {
     pub fn reset(&mut self) {
@@ -126,7 +132,7 @@ impl SimfileStore {
 
     pub fn get<F>(&mut self, bucket: &BucketId, mut visit: F) -> Result<()>
     where
-        F: FnMut(&mut SimfileStore, Vec<Box<Simfile>>) -> Result<()>,
+        F: FnMut(&mut SimfileStore, &mut Vec<Box<Simfile>>) -> Result<()>,
     {
         let (name, take) = bucket.unwrap_resolved();
         if name.is_empty() {
@@ -134,17 +140,21 @@ impl SimfileStore {
             trace!("    get null bucket");
             return Ok(());
         }
-        if take {
-            if let Some(mut b) = self.by_name.remove(name) {
+        let b = if take {
+            self.by_name.remove(name).map(|b| {
                 trace!("    take bucket \"{}\" ({:?})", name, b);
-                b.take_lists(|list| visit(self, list))?;
-            }
+                b
+            })
         } else {
-            if let Some(b) = self.by_name.get(name) {
+            self.by_name.get(name).map(|b| {
                 trace!("    get bucket \"{}\" ({:?})", name, b);
-                let mut b = b.clone();
-                b.take_lists(|list| visit(self, list))?;
-            }
+                b.clone()
+            })
+        };
+        if let Some(mut b) = b {
+            let mut tmp_vec = mem::replace(&mut self.tmp_vec, Vec::new());
+            b.take_lists(&mut tmp_vec, |list| visit(self, list))?;
+            self.tmp_vec = tmp_vec;
         }
         Ok(())
     }
@@ -154,14 +164,19 @@ impl SimfileStore {
         F: FnMut(&mut SimfileStore, Box<Simfile>) -> Result<()>,
     {
         self.get(bucket, |store, list| {
-            for sm in list {
+            for sm in list.drain(..) {
                 visit(store, sm)?;
             }
             Ok(())
         })
     }
 
-    pub fn put(&mut self, bucket: &BucketId, simfiles: Vec<Box<Simfile>>) {
+    pub fn put<I>(&mut self, bucket: &BucketId, simfiles: I)
+    where
+        I: IntoIterator<Item = Box<Simfile>>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let simfiles = simfiles.into_iter();
         let name = bucket.unwrap_name();
         if name.is_empty() {
             //Null bucket

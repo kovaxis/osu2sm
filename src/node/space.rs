@@ -32,11 +32,11 @@ impl Default for MinDist {
 
 impl Node for Space {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
-        store.get(&self.from, |store, mut list| {
+        store.get(&self.from, |store, list| {
             for sm in list.iter_mut() {
                 make_space(sm, self)?;
             }
-            store.put(&self.into, list);
+            store.put(&self.into, mem::replace(list, default()));
             Ok(())
         })
     }

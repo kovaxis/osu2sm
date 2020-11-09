@@ -188,6 +188,7 @@ fn run_nodes(ctx: &Ctx) -> Result<()> {
         store.reset();
         node.entry(&mut *store, &mut |store| {
             for node in ctx.nodes.iter().skip(i + 1) {
+                trace!("  applying node {:?}", node);
                 node.apply(store)?;
             }
             Ok(())
