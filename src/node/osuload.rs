@@ -230,10 +230,13 @@ fn process_beatmapset(
 ) -> Result<Vec<Box<Simfile>>> {
     info!("processing \"{}\":", bmset_path.display());
     //Parse and convert beatmaps
+    let mut bmset_cache = BmsetCache::default();
     let mut flat_simfiles = Vec::new();
     for bm_path in bm_paths {
         let old_simfile_count = flat_simfiles.len();
-        let result = process_beatmap(conf, bmset_path, bm_path, |sm| flat_simfiles.push(sm));
+        let result = process_beatmap(conf, &mut bmset_cache, bmset_path, bm_path, |sm| {
+            flat_simfiles.push(sm)
+        });
         let bm_name = bm_path.file_name().unwrap_or_default().to_string_lossy();
         match result {
             Ok(()) => {
@@ -253,11 +256,209 @@ fn process_beatmapset(
     Ok(flat_simfiles)
 }
 
+#[derive(Default)]
+struct BmsetCache {
+    audio_len: HashMap<PathBuf, f64>,
+}
+impl BmsetCache {
+    /// Get the length of an audio file in seconds.
+    fn get_audio_len(&mut self, path: &Path) -> (f64, Result<()>) {
+        let mut result = Ok(());
+        let len = match self.audio_len.get(path) {
+            Some(len) => *len,
+            None => {
+                let len = match mp3_duration::from_path(path) {
+                    Ok(len) => len,
+                    Err(err) => {
+                        let len = err.at_duration;
+                        result = Err(err.into());
+                        len
+                    }
+                }
+                .as_secs_f64();
+                self.audio_len.insert(path.to_path_buf(), len);
+                len
+            }
+        };
+        (len, result)
+    }
+}
+
+struct ConvCtx<'a> {
+    next_idx: usize,
+    first_tp: TimingPoint,
+    cur_tp: TimingPoint,
+    cur_beat: BeatPos,
+    cur_beat_nonapproxed: f64,
+    last_time: f64,
+    timing_points: &'a [TimingPoint],
+    out_bpms: Vec<ControlPoint>,
+    out_notes: Vec<Note>,
+}
+impl ConvCtx<'_> {
+    fn new(bm: &Beatmap) -> Result<ConvCtx> {
+        let first_tp = bm
+            .timing_points
+            .first()
+            .ok_or(anyhow!("no timing points"))?
+            .clone();
+        ensure!(
+            first_tp.beat_len > 0.,
+            "beatLength of first timing point must be positive (is {})",
+            first_tp.beat_len
+        );
+        let mut conv = ConvCtx {
+            next_idx: 1,
+            cur_tp: first_tp.clone(),
+            first_tp: first_tp,
+            cur_beat: BeatPos::from(0.),
+            cur_beat_nonapproxed: 0.,
+            last_time: f64::NEG_INFINITY,
+            timing_points: &bm.timing_points[..],
+            out_bpms: Vec::new(),
+            out_notes: Vec::new(),
+        };
+        // Adjust for hit objects that occur before the first timing point by adding another timing
+        // point even earlier.
+        if let Some(first_hit) = bm.hit_objects.first() {
+            while first_hit.time < conv.first_tp.time {
+                conv.first_tp.time -= conv.first_tp.beat_len * conv.first_tp.meter as f64;
+            }
+            conv.cur_tp = conv.first_tp.clone();
+            conv.out_bpms.push(ControlPoint {
+                beat: BeatPos::from(0.),
+                beat_len: conv.first_tp.beat_len / 1000.,
+            });
+        }
+        Ok(conv)
+    }
+
+    /// Convert from a point in time to a snapped beat number, taking into account changing BPM.
+    /// Should never be called with a time smaller than the last call!
+    fn get_beat(&mut self, time: f64) -> BeatPos {
+        /*
+        ensure!(
+            time >= self.last_time,
+            "object must monotonically increase in time",
+        );
+        */
+        self.last_time = time;
+        //Advance timing points
+        while self.next_idx < self.timing_points.len() {
+            let next_tp = &self.timing_points[self.next_idx];
+            if next_tp.beat_len <= 0. {
+                //Skip inherited timing points
+            } else if time >= next_tp.time {
+                //Advance to this timing point
+                self.cur_beat_nonapproxed +=
+                    (next_tp.time - self.cur_tp.time) / self.cur_tp.beat_len;
+                //Arbitrary round-to-beat because of broken beatmaps
+                self.cur_beat = BeatPos::from(self.cur_beat_nonapproxed).round(2);
+                self.cur_tp = next_tp.clone();
+                self.out_bpms.push(ControlPoint {
+                    beat: self.cur_beat,
+                    beat_len: self.cur_tp.beat_len / 1000.,
+                });
+            } else {
+                //Still within the current timing point
+                break;
+            }
+            self.next_idx += 1;
+        }
+        //Use the current timing point to determine note beat
+        self.cur_beat + BeatPos::from((time - self.cur_tp.time) / self.cur_tp.beat_len)
+    }
+
+    /// Add an output note.
+    fn push_note(&mut self, beat: BeatPos, key: i32, kind: char) {
+        self.out_notes.push(Note { beat, key, kind });
+    }
+
+    /// Output the final simfile in all supported gamemodes.
+    fn finish(
+        self,
+        conf: &OsuLoad,
+        bmset_cache: &mut BmsetCache,
+        bmset_path: &Path,
+        bm: &Beatmap,
+        key_count: i32,
+        mut out: impl FnMut(Box<Simfile>),
+    ) -> Result<()> {
+        // Generate sample length from audio file
+        let default_len = 60.;
+        let sample_len = if bm.audio.is_empty() || !conf.query_audio_len {
+            default_len
+        } else {
+            let audio_path = bmset_path.join(&bm.audio);
+            let (len, result) = bmset_cache.get_audio_len(&audio_path);
+            if let Err(err) = result {
+                warn!(
+                    "    failed to get full audio length for \"{}\": {:#}",
+                    audio_path.display(),
+                    err
+                );
+            }
+            (len - bm.preview_start / 1000.).max(10.)
+        };
+        // Create the final SM file in all supported gamemodes
+        for gamemode in conf
+            .gamemodes
+            .iter()
+            .copied()
+            .filter(|gm| gm.key_count() == key_count as i32)
+        {
+            out(Box::new(Simfile {
+                title: if conf.unicode {
+                    bm.title_unicode.clone()
+                } else {
+                    bm.title.clone()
+                },
+                title_trans: bm.title.clone(),
+                subtitle: bm.version.clone(),
+                subtitle_trans: bm.version.clone(),
+                artist: if conf.unicode {
+                    bm.artist_unicode.clone()
+                } else {
+                    bm.artist.clone()
+                },
+                artist_trans: bm.artist.clone(),
+                genre: String::new(),
+                credit: bm.creator.clone(),
+                banner: None,
+                background: Some(
+                    if conf.video && !bm.video.is_empty() {
+                        Some(bm.video.clone().into())
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| bm.background.clone().into()),
+                ),
+                lyrics: None,
+                cdtitle: None,
+                music: Some(bm.audio.clone().into()),
+                offset: self.first_tp.time / -1000.,
+                bpms: self.out_bpms.clone(),
+                stops: vec![],
+                sample_start: Some(bm.preview_start / 1000.),
+                sample_len: Some(sample_len),
+                gamemode,
+                desc: bm.version.clone(),
+                difficulty: Difficulty::Edit,
+                difficulty_num: f64::NAN,
+                radar: [0., 0., 0., 0., 0.],
+                notes: self.out_notes.clone(),
+            }));
+        }
+        Ok(())
+    }
+}
+
 fn process_beatmap(
     conf: &OsuLoad,
+    bmset_cache: &mut BmsetCache,
     bmset_path: &Path,
     bm_path: &Path,
-    mut out: impl FnMut(Box<Simfile>),
+    out: impl FnMut(Box<Simfile>),
 ) -> Result<()> {
     let bm = Beatmap::parse(conf.offset, bm_path).context("read/parse beatmap file")?;
     ensure!(
@@ -271,94 +472,16 @@ fn process_beatmap(
         "invalid keycount {}",
         key_count
     );
-    let mut first_tp = bm
-        .timing_points
-        .first()
-        .ok_or(anyhow!("no timing points"))?
-        .clone();
-    ensure!(
-        first_tp.beat_len > 0.,
-        "beatLength of first timing point must be positive (is {})",
-        first_tp.beat_len
-    );
-    struct ConvCtx<'a> {
-        next_idx: usize,
-        cur_tp: TimingPoint,
-        cur_beat: BeatPos,
-        cur_beat_nonapproxed: f64,
-        timing_points: &'a [TimingPoint],
-        out_bpms: Vec<ControlPoint>,
-        out_notes: Vec<Note>,
-    }
-    let mut conv = ConvCtx {
-        next_idx: 1,
-        cur_tp: first_tp.clone(),
-        cur_beat: BeatPos::from(0.),
-        cur_beat_nonapproxed: 0.,
-        timing_points: &bm.timing_points[..],
-        out_bpms: Vec::new(),
-        out_notes: Vec::new(),
-    };
-    /// Convert from a point in time to a snapped beat number, taking into account changing BPM.
-    /// Should never be called with a time smaller than the last call!
-    fn get_beat(conv: &mut ConvCtx, time: f64) -> BeatPos {
-        //Advance timing points
-        while conv.next_idx < conv.timing_points.len() {
-            let next_tp = &conv.timing_points[conv.next_idx];
-            if next_tp.beat_len <= 0. {
-                //Skip inherited timing points
-            } else if time >= next_tp.time {
-                //Advance to this timing point
-                conv.cur_beat_nonapproxed +=
-                    (next_tp.time - conv.cur_tp.time) / conv.cur_tp.beat_len;
-                //Arbitrary round-to-beat because of broken beatmaps
-                conv.cur_beat = BeatPos::from(conv.cur_beat_nonapproxed).round(2);
-                conv.cur_tp = next_tp.clone();
-                conv.out_bpms.push(ControlPoint {
-                    beat: conv.cur_beat,
-                    beat_len: conv.cur_tp.beat_len / 1000.,
-                });
-            } else {
-                //Still within the current timing point
-                break;
-            }
-            conv.next_idx += 1;
-        }
-        //Use the current timing point to determine note beat
-        conv.cur_beat + BeatPos::from((time - conv.cur_tp.time) / conv.cur_tp.beat_len)
-    }
-    // Adjust for hit objects that occur before the first timing point by adding another timing
-    // point even earlier.
-    if let Some(first_hit) = bm.hit_objects.first() {
-        while first_hit.time < first_tp.time {
-            first_tp.time -= first_tp.beat_len * first_tp.meter as f64;
-        }
-        conv.cur_tp = first_tp.clone();
-        conv.out_bpms.push(ControlPoint {
-            beat: BeatPos::from(0.),
-            beat_len: first_tp.beat_len / 1000.,
-        });
-    }
+    let mut conv = ConvCtx::new(&bm)?;
     // Add hit objects as measure objects, pushing out SM notedata on the fly.
     let mut pending_tails = Vec::new();
-    let mut last_time = f64::NEG_INFINITY;
     for obj in bm.hit_objects.iter() {
-        //Ensure objects increase monotonically in time
-        ensure!(
-            obj.time >= last_time,
-            "hit object occurs before previous object"
-        );
-        last_time = obj.time;
         //Insert any pending long note tails
         pending_tails.retain(|&(time, key)| {
             if time <= obj.time {
                 // Insert now
-                let end_beat = get_beat(&mut conv, time);
-                conv.out_notes.push(Note {
-                    kind: Note::KIND_TAIL,
-                    beat: end_beat,
-                    key,
-                });
+                let end_beat = conv.get_beat(time);
+                conv.push_note(end_beat, key, Note::KIND_TAIL);
                 false
             } else {
                 // Keep waiting
@@ -366,7 +489,7 @@ fn process_beatmap(
             }
         });
         //Get data for this object
-        let obj_beat = get_beat(&mut conv, obj.time);
+        let obj_beat = conv.get_beat(obj.time);
         let obj_key = (obj.x * key_count / 512.).floor();
         ensure!(
             obj_key.is_finite() && obj_key as i32 >= 0 && (obj_key as i32) < key_count as i32,
@@ -398,102 +521,17 @@ fn process_beatmap(
                 .unwrap_or(pending_tails.len());
             pending_tails.insert(insert_idx, (end_time, obj_key));
             // Insert the long note head
-            conv.out_notes.push(Note {
-                kind: Note::KIND_HEAD,
-                beat: obj_beat,
-                key: obj_key,
-            });
+            conv.push_note(obj_beat, obj_key, Note::KIND_HEAD);
         } else if obj.ty & osufile::TYPE_HIT != 0 {
             // Hit note
-            conv.out_notes.push(Note {
-                kind: Note::KIND_HIT,
-                beat: obj_beat,
-                key: obj_key,
-            });
+            conv.push_note(obj_beat, obj_key, Note::KIND_HIT);
         }
     }
     // Push out any pending long note tails
     for (time, key) in pending_tails {
-        let end_beat = get_beat(&mut conv, time);
-        conv.out_notes.push(Note {
-            kind: '3',
-            beat: end_beat,
-            key,
-        });
+        let end_beat = conv.get_beat(time);
+        conv.push_note(end_beat, key, '3');
     }
-    // Generate sample length from audio file
-    let default_len = 60.;
-    let sample_len = if bm.audio.is_empty() || !conf.query_audio_len {
-        default_len
-    } else {
-        let audio_path = bmset_path.join(&bm.audio);
-        let (len, result) = get_audio_len(&audio_path);
-        if let Err(err) = result {
-            warn!(
-                "    warning: failed to get full audio length for \"{}\": {:#}",
-                audio_path.display(),
-                err
-            );
-        }
-        (len - bm.preview_start / 1000.).max(10.)
-    };
-    // Create the final SM file in all supported gamemodes
-    for gamemode in conf
-        .gamemodes
-        .iter()
-        .copied()
-        .filter(|gm| gm.key_count() == key_count as i32)
-    {
-        out(Box::new(Simfile {
-            title: if conf.unicode {
-                bm.title_unicode.clone()
-            } else {
-                bm.title.clone()
-            },
-            title_trans: bm.title.clone(),
-            subtitle: bm.version.clone(),
-            subtitle_trans: bm.version.clone(),
-            artist: if conf.unicode {
-                bm.artist_unicode.clone()
-            } else {
-                bm.artist.clone()
-            },
-            artist_trans: bm.artist.clone(),
-            genre: String::new(),
-            credit: bm.creator.clone(),
-            banner: None,
-            background: Some(
-                if conf.video && !bm.video.is_empty() {
-                    Some(bm.video.clone().into())
-                } else {
-                    None
-                }
-                .unwrap_or_else(|| bm.background.clone().into()),
-            ),
-            lyrics: None,
-            cdtitle: None,
-            music: Some(bm.audio.clone().into()),
-            offset: first_tp.time / -1000.,
-            bpms: conv.out_bpms.clone(),
-            stops: vec![],
-            sample_start: Some(bm.preview_start / 1000.),
-            sample_len: Some(sample_len),
-            gamemode,
-            desc: bm.version.clone(),
-            difficulty: Difficulty::Edit,
-            difficulty_num: f64::NAN,
-            radar: [0., 0., 0., 0., 0.],
-            notes: conv.out_notes.clone(),
-        }));
-    }
-    Ok(())
-}
-
-/// Get the length of an audio file in seconds.
-fn get_audio_len(path: &Path) -> (f64, Result<()>) {
-    let (len, result) = match mp3_duration::from_path(path) {
-        Ok(len) => (len, Ok(())),
-        Err(err) => (err.at_duration, Err(err.into())),
-    };
-    (len.as_secs_f64(), result)
+    //Finish up
+    conv.finish(conf, bmset_cache, bmset_path, &bm, key_count as i32, out)
 }
