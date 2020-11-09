@@ -259,25 +259,25 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
     //Keep track of the last auto-output, to bind it to any auto-input
     fn resolve_layer(
         ctx: &mut State,
-        input: &str,
-        output: &str,
+        input: Option<&str>,
+        output: Option<&str>,
         nodes: &[ConcreteNode],
         chained: bool,
     ) -> Result<()> {
-        let mut last_magnetic_out = Some(input.to_string());
+        let mut last_magnetic_out = input.map(str::to_string);
         let in_node_count = nodes.len();
         for (i, orig_node) in nodes.iter().enumerate() {
             let mut node = orig_node.clone().into_dyn();
             //The last node has its output automatically bound to the output
             //However, in non-chained mode the output is always bound to the parent output
             let mut magnetic_out = if !chained || i + 1 == in_node_count {
-                Some(output.to_string())
+                output.map(str::to_string)
             } else {
                 None
             };
             //In non-chained mode the input is always the parent input
             if !chained {
-                last_magnetic_out = Some(input.to_string());
+                last_magnetic_out = input.map(str::to_string);
             }
             let mut insert_idx = ctx.out.len();
             //Resolve each bucket
@@ -309,7 +309,7 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
                                     .take()
                                     .ok_or_else(|| anyhow!("attempt to use input, but previous node does not output (in node {:?})", orig_node))?;
                                 let from_nested = ctx.gen_unique_name();
-                                resolve_layer(ctx, &into_nested, &from_nested, inner_list, false)?;
+                                resolve_layer(ctx, Some(&into_nested), Some(&from_nested), inner_list, false)?;
                                 //Evaluate the current node _after_ the nested node is evaluated
                                 insert_idx = ctx.out.len();
                                 from_nested
@@ -318,7 +318,7 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
                                 let into_nested = ctx.gen_unique_name();
                                 let from_nested =
                                     magnetic_out.get_or_insert_with(|| ctx.gen_unique_name());
-                                resolve_layer(ctx, &into_nested, from_nested, inner_list, false)?;
+                                resolve_layer(ctx, Some(&into_nested), Some(from_nested), inner_list, false)?;
                                 into_nested
                             }
                             BucketKind::Generic => bail!("cannot use generic buckets with `Nest`"),
@@ -345,7 +345,7 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
         out: Vec::with_capacity(nodes.len()),
         next_id: 0,
     };
-    resolve_layer(&mut ctx, "~in", "~out", nodes, true)?;
+    resolve_layer(&mut ctx, None, None, nodes, true)?;
     //Optimize the last reads from each bucket, by taking the value instead of cloning it
     let mut last_reads: HashMap<String, &mut BucketId> = default();
     for node in ctx.out.iter_mut() {
