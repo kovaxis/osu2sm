@@ -51,12 +51,28 @@ impl Default for Rate {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RateMethod {
-    EffectiveBpm { exponent: f64 },
+    NoteCount {
+        /// Whether to take the logarithm of the amount of notes, instead of the raw amount
+        /// itself.
+        ///
+        /// More specifically, if `log` is greater than zero, take the logarithm base `log` of the
+        /// amount of non-tail notes.
+        #[serde(default)]
+        log: f64,
+    },
+    EffectiveBpm {
+        #[serde(default = "default_exponent")]
+        exponent: f64,
+    },
 }
 impl Default for RateMethod {
     fn default() -> Self {
         Self::EffectiveBpm { exponent: 2. }
     }
+}
+
+fn default_exponent() -> f64 {
+    3.
 }
 
 impl Node for Rate {
@@ -79,6 +95,7 @@ impl Node for Rate {
 
 fn rate(conf: &Rate, sm: &mut Simfile) -> Result<()> {
     let computed = match &conf.method {
+        RateMethod::NoteCount { log } => get_note_count(*log, sm),
         RateMethod::EffectiveBpm { exponent } => {
             // Get the in-practice BPM of this simfile.
             get_practical_bpm(*exponent, sm)
@@ -101,7 +118,21 @@ fn rate(conf: &Rate, sm: &mut Simfile) -> Result<()> {
     Ok(())
 }
 
-fn get_practical_bpm(exp: f64, sm: &mut Simfile) -> f64 {
+fn get_note_count(log_base: f64, sm: &Simfile) -> f64 {
+    let mut count = 0;
+    for note in sm.notes.iter() {
+        if !note.is_tail() {
+            count += 1;
+        }
+    }
+    if log_base > 0. {
+        (count as f64).log(log_base)
+    } else {
+        count as f64
+    }
+}
+
+fn get_practical_bpm(exp: f64, sm: &Simfile) -> f64 {
     let exp = exp as f32;
     let mut last_time = None;
     let mut to_time = sm.beat_to_time();
@@ -123,7 +154,7 @@ fn get_practical_bpm(exp: f64, sm: &mut Simfile) -> f64 {
     if total_gaps <= 0 {
         total_freq = 0.;
     } else {
-    total_freq = (total_freq / total_gaps as f32).powf(1. / exp);
+        total_freq = (total_freq / total_gaps as f32).powf(1. / exp);
     }
     (total_freq * 60.) as f64
 }
