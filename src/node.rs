@@ -9,7 +9,7 @@ pub use crate::node::{
     pipe::Pipe,
     rate::{Rate, RateMethod},
     remap::Remap,
-    simfilefix::SimfileFix,
+    select::Select,
     simfilewrite::SimfileWrite,
     simultaneous::Simultaneous,
     space::Space,
@@ -23,7 +23,7 @@ mod prelude {
             osuload::OsuLoad,
             pipe::Pipe,
             remap::Remap,
-            simfilefix::SimfileFix,
+            select::Select,
             simfilewrite::SimfileWrite,
             simultaneous::Simultaneous,
             space::Space,
@@ -39,7 +39,7 @@ mod osuload;
 mod pipe;
 mod rate;
 mod remap;
-mod simfilefix;
+mod select;
 mod simfilewrite;
 mod simultaneous;
 mod space;
@@ -425,7 +425,7 @@ make_concrete!(
     Remap,
     Simultaneous,
     Align,
-    SimfileFix,
+    Select,
     Rate,
     Space,
     OsuLoad,

@@ -1,43 +1,16 @@
-//! Simfiles have several (stupid) limitations.
-//!
-//! Fix them, ideally before outputting.
+//! Only one of each difficulty can be output for each gamemode, effectively limiting the
+//! amount of charts per song per gamemode to 6, tops.
+//! Damn good design.
 
 use crate::node::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SimfileFix {
+pub struct Select {
     pub from: BucketId,
     pub into: BucketId,
-    /// Only one of each difficulty can be output for each gamemode, effectively limiting the
-    /// amount of charts per song per gamemode to 6, tops.
-    /// Damn good design.
-    pub trim_diffs: Option<TrimDiffs>,
-    /// Fix the stupid simfile format that doesn't support holds ending and another note starting
-    /// at the same time.
-    /// Pushes hold tails that are on the same beat and key as another note 1 microbeat backward.
-    pub fix_holds: bool,
-    /// Whether to automatically merge input simfiles by music/gamemode, or to process each input
-    /// list individually.
-    ///
-    /// Defaults to `true`.
+    /// Group input simfiles by music and gamemode before trimming difficulties.
     pub merge: bool,
-}
-impl Default for SimfileFix {
-    fn default() -> Self {
-        Self {
-            from: default(),
-            into: default(),
-            trim_diffs: Some(default()),
-            fix_holds: true,
-            merge: true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TrimDiffs {
     /// The maximum amount of simfiles to select per list.
     /// Having a value larger than the length of `diff_names` makes no effect.
     pub max: usize,
@@ -55,10 +28,13 @@ pub struct TrimDiffs {
     /// Defaults to the entire range of difficulties (`Beginner` - `Challenge`, `Edit`).
     pub diff_names: Vec<Difficulty>,
 }
-impl Default for TrimDiffs {
+impl Default for Select {
     fn default() -> Self {
         use crate::simfile::Difficulty::*;
         Self {
+            from: default(),
+            into: default(),
+            merge: true,
             max: 6,
             diff_names: vec![Beginner, Easy, Medium, Hard, Challenge, Edit],
             prefer: default(),
@@ -184,17 +160,10 @@ impl PreferDiff {
     }
 }
 
-impl Node for SimfileFix {
+impl Node for Select {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         let process_list = |store: &mut SimfileStore, mut list: Vec<Box<Simfile>>| -> Result<()> {
-            if let Some(conf) = &self.trim_diffs {
-                select_difficulties(conf, &mut list)?;
-            }
-            if self.fix_holds {
-                for sm in list.iter_mut() {
-                    sm.fix_tails()?;
-                }
-            }
+            trim_difficulties(self, &mut list)?;
             store.put(&self.into, list);
             Ok(())
         };
@@ -226,7 +195,7 @@ impl Node for SimfileFix {
 }
 
 /// There seems to be a max of 6 difficulties, so use them wisely and sort them.
-pub fn select_difficulties(conf: &TrimDiffs, simfiles: &mut Vec<Box<Simfile>>) -> Result<()> {
+pub fn trim_difficulties(conf: &Select, simfiles: &mut Vec<Box<Simfile>>) -> Result<()> {
     //Exit early on the degenerate case, because weird stuff happens in these edge cases
     if conf.diff_names.is_empty() || conf.max <= 0 {
         simfiles.clear();

@@ -96,19 +96,10 @@ impl Default for Opts {
                     ..default()
                 }
                 .into(),
-                node::Filter {
-                    ops: vec![(
-                        node::Property::Gamemode,
-                        node::FilterOp::Allow(vec!["DanceSingle".to_string()]),
-                    )],
-                    ..default()
-                }
-                .into(),
                 node::Rate { ..default() }.into(),
-                node::SimfileFix { ..default() }.into(),
+                node::Select { ..default() }.into(),
                 node::SimfileWrite {
                     output: "".to_string(),
-                    in_place_from: None,
                     ..default()
                 }
                 .into(),
