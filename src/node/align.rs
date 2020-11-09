@@ -23,7 +23,7 @@ impl Node for Align {
             for sm in list.iter_mut() {
                 align(sm, self)?;
             }
-            store.put(&self.into, mem::replace(list, Vec::new()));
+            store.put(&self.into, mem::replace(list, default()));
             Ok(())
         })
     }
@@ -37,6 +37,23 @@ impl Node for Align {
 
 fn align(sm: &mut Simfile, conf: &Align) -> Result<()> {
     let align_to = BeatPos::from(conf.to);
-    sm.notes.retain(|note| note.beat.is_aligned(align_to));
+    for i in 0..sm.notes.len() {
+        let note = &mut sm.notes[i];
+        if !note.is_tail() && !note.beat.is_aligned(align_to) {
+            let head_key = note.key;
+            note.key = -1;
+            if note.is_head() {
+                //If note is a head, also remove its tail
+                for j in i + 1..sm.notes.len() {
+                    let note = &mut sm.notes[j];
+                    if note.key == head_key && note.is_tail() {
+                        note.key = -1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    sm.notes.retain(|note| note.key >= 0);
     Ok(())
 }

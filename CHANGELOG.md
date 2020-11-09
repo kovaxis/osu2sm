@@ -10,3 +10,4 @@
 - Use `bumpalo` for fastness.
 - Optimize `get_each` and add a `take_each`, to take advantage of the fact that simfiles are
     already stored linearly by default.
+- Take amount of simultaneous notes into account for `EffectiveBpm`.

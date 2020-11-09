@@ -55,9 +55,13 @@ fn limit_simultaneous_keys(sm: &mut Simfile, conf: &Simultaneous) -> Result<()> 
         beat_notes.clear();
         while note_idx < sm.notes.len() && sm.notes[note_idx].beat == cur_beat {
             //Check out this note
-            let note = &sm.notes[note_idx];
+            let note = &mut sm.notes[note_idx];
             if note.is_tail() {
-                active_notes[note.key as usize] = false;
+                if active_notes[note.key as usize] {
+                    active_notes[note.key as usize] = false;
+                } else {
+                    note.key = -1;
+                }
             } else {
                 beat_notes.push(note_idx);
                 if note.is_head() {

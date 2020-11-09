@@ -107,7 +107,10 @@ fn get_practical_bpm(exp: f64, sm: &mut Simfile) -> f64 {
     let mut to_time = sm.beat_to_time();
     let mut total_freq = 0.;
     let mut total_gaps = 0;
-    for (beat, _, _) in sm.iter_beats() {
+    for (beat, start, end) in sm.iter_beats() {
+        if sm.notes[start..end].iter().all(|note| note.is_tail()) {
+            continue;
+        }
         let time = to_time.beat_to_time(beat);
         if let Some(last_time) = last_time {
             let gap = (time - last_time) as f32;
@@ -117,6 +120,10 @@ fn get_practical_bpm(exp: f64, sm: &mut Simfile) -> f64 {
         }
         last_time = Some(time);
     }
+    if total_gaps <= 0 {
+        total_freq = 0.;
+    } else {
     total_freq = (total_freq / total_gaps as f32).powf(1. / exp);
+    }
     (total_freq * 60.) as f64
 }
