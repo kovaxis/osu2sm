@@ -1,6 +1,6 @@
 //! Make a minimum space between notes by removing higher-divisor notes.
 
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,7 +30,7 @@ impl Default for MinDist {
     }
 }
 
-impl Transform for Space {
+impl Node for Space {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             for sm in list.iter_mut() {

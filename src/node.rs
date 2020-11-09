@@ -1,40 +1,46 @@
-//! Transformations on in-memory simfiles.
+//! Create, modify and transform in-memory simfiles.
 
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
-pub use crate::transform::{
+pub use crate::node::{
     align::Align,
     filter::{Filter, FilterOp, Property},
+    osuload::OsuLoad,
     pipe::Pipe,
     rate::{Rate, RateMethod},
     remap::Remap,
     simfilefix::SimfileFix,
+    simfilewrite::SimfileWrite,
     simultaneous::Simultaneous,
     space::Space,
 };
 
 mod prelude {
     pub use crate::{
-        prelude::*,
-        transform::{
+        node::{
             align::Align,
             filter::{Filter, FilterOp, Property},
+            osuload::OsuLoad,
             pipe::Pipe,
             remap::Remap,
             simfilefix::SimfileFix,
+            simfilewrite::SimfileWrite,
             simultaneous::Simultaneous,
             space::Space,
             BucketId, BucketIter, BucketKind,
         },
+        prelude::*,
     };
 }
 
 mod align;
 mod filter;
+mod osuload;
 mod pipe;
 mod rate;
 mod remap;
 mod simfilefix;
+mod simfilewrite;
 mod simultaneous;
 mod space;
 
@@ -86,21 +92,36 @@ impl fmt::Debug for Bucket {
     }
 }
 
-/// Stores simfiles while they are being transformed.
+/// Stores simfiles while in transit.
 #[derive(Debug, Default, Clone)]
 pub struct SimfileStore {
     by_name: HashMap<String, Bucket>,
+    globals: HashMap<String, String>,
 }
 impl SimfileStore {
-    pub fn reset(&mut self, input: Vec<Box<Simfile>>) {
+    pub fn reset(&mut self) {
         self.by_name.clear();
-        let mut in_bucket = Bucket::default();
-        in_bucket.put_list(input);
-        self.by_name.insert("~in".to_string(), in_bucket);
+        self.globals.clear();
     }
 
-    pub fn take_output(&mut self) -> Result<Vec<Box<Simfile>>> {
-        Ok(self.by_name.remove("~out").unwrap_or_default().simfiles)
+    pub fn global_set(&mut self, name: &str, value: String) {
+        match self.globals.get_mut(name) {
+            Some(val) => {
+                *val = value;
+            }
+            None => {
+                self.globals.insert(name.to_string(), value);
+            }
+        }
+    }
+
+    pub fn global_get_expect(&self, name: &str) -> Result<&str> {
+        self.global_get(name)
+            .ok_or(anyhow!("global \"{}\" not set", name))
+    }
+
+    pub fn global_get(&self, name: &str) -> Option<&str> {
+        self.globals.get(name).map(|s| &s[..])
     }
 
     pub fn get<F>(&mut self, bucket: &BucketId, mut visit: F) -> Result<()>
@@ -161,7 +182,7 @@ pub enum BucketId {
     Auto,
     Null,
     Name(String),
-    Nest(Vec<ConcreteTransform>),
+    Nest(Vec<ConcreteNode>),
 }
 impl Default for BucketId {
     fn default() -> Self {
@@ -178,15 +199,28 @@ impl BucketId {
     fn unwrap_resolved(&self) -> (&str, bool) {
         match self {
             BucketId::Resolved(name, take) => (&name[..], *take),
-            _ => panic!("transform i/o bucket not resolved: {:?}", self),
+            _ => panic!("node i/o bucket not resolved: {:?}", self),
         }
     }
 }
 
-pub trait Transform: fmt::Debug {
-    fn apply(&self, sm_store: &mut SimfileStore) -> Result<()>;
+pub trait Node: fmt::Debug {
     /// Must yield all `BucketIter::Input` values before all `BucketIter::Output` values.
     fn buckets_mut(&mut self) -> BucketIter;
+    /// Run on all filters once before starting.
+    fn prepare(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Run on every filters once, so that entry point filters can load simfiles.
+    fn entry(
+        &self,
+        _sm_store: &mut SimfileStore,
+        _on_bmset: &mut dyn FnMut(&mut SimfileStore) -> Result<()>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// Run on every filter once for each simfile set.
+    fn apply(&self, sm_store: &mut SimfileStore) -> Result<()>;
 }
 
 pub type BucketIter<'a> = Box<dyn 'a + Iterator<Item = (BucketKind, &'a mut BucketId)>>;
@@ -211,9 +245,9 @@ impl BucketKind {
     }
 }
 
-pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn Transform>>> {
+pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
     struct State {
-        out: Vec<Box<dyn Transform>>,
+        out: Vec<Box<dyn Node>>,
         next_id: u32,
     }
     impl State {
@@ -227,16 +261,16 @@ pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn T
         ctx: &mut State,
         input: &str,
         output: &str,
-        transforms: &[ConcreteTransform],
+        nodes: &[ConcreteNode],
         chained: bool,
     ) -> Result<()> {
         let mut last_magnetic_out = Some(input.to_string());
-        let in_transform_count = transforms.len();
-        for (i, orig_trans) in transforms.iter().enumerate() {
-            let mut trans = orig_trans.clone().into_dyn();
-            //The last transform has its output automatically bound to the output
+        let in_node_count = nodes.len();
+        for (i, orig_node) in nodes.iter().enumerate() {
+            let mut node = orig_node.clone().into_dyn();
+            //The last node has its output automatically bound to the output
             //However, in non-chained mode the output is always bound to the parent output
-            let mut magnetic_out = if !chained || i + 1 == in_transform_count {
+            let mut magnetic_out = if !chained || i + 1 == in_node_count {
                 Some(output.to_string())
             } else {
                 None
@@ -247,17 +281,17 @@ pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn T
             }
             let mut insert_idx = ctx.out.len();
             //Resolve each bucket
-            for (kind, bucket) in trans.buckets_mut() {
+            for (kind, bucket) in node.buckets_mut() {
                 let name = match bucket {
                     BucketId::Auto => match kind {
                         BucketKind::Input => last_magnetic_out
                             .take()
-                            .ok_or_else(|| anyhow!("attempt to use input, but previous transform does not output (in transform {:?})", orig_trans))?,
+                            .ok_or_else(|| anyhow!("attempt to use input, but previous node does not output (in node {:?})", orig_node))?,
                         BucketKind::Output => magnetic_out
                             .get_or_insert_with(|| ctx.gen_unique_name())
                             .clone(),
                         BucketKind::Generic => bail!(
-                            "attempt to auto-bind generic bucket (in transform {})",
+                            "attempt to auto-bind generic bucket (in node {})",
                             i + 1
                         ),
                     },
@@ -273,11 +307,10 @@ pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn T
                             BucketKind::Input => {
                                 let into_nested = last_magnetic_out
                                     .take()
-                                    .ok_or_else(|| anyhow!("attempt to use input, but previous transform does not output (in transform {:?})", orig_trans))?;
+                                    .ok_or_else(|| anyhow!("attempt to use input, but previous node does not output (in node {:?})", orig_node))?;
                                 let from_nested = ctx.gen_unique_name();
                                 resolve_layer(ctx, &into_nested, &from_nested, inner_list, false)?;
-                                //Evaluate the current transform _after_ the nested transform is
-                                //evaluated
+                                //Evaluate the current node _after_ the nested node is evaluated
                                 insert_idx = ctx.out.len();
                                 from_nested
                             }
@@ -299,24 +332,24 @@ pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn T
             //Bookkeeping
             ensure!(
                 last_magnetic_out.is_none() || i == 0,
-                "output from previous transform is not used as input (in transform {:?})",
-                trans
+                "output from previous node is not used as input (in node {:?})",
+                node
             );
             last_magnetic_out = magnetic_out;
-            ctx.out.insert(insert_idx, trans);
+            ctx.out.insert(insert_idx, node);
         }
         Ok(())
     }
-    //Process transforms and output them here
+    //Process nodes and output them here
     let mut ctx = State {
-        out: Vec::with_capacity(transforms.len()),
+        out: Vec::with_capacity(nodes.len()),
         next_id: 0,
     };
-    resolve_layer(&mut ctx, "~in", "~out", transforms, true)?;
+    resolve_layer(&mut ctx, "~in", "~out", nodes, true)?;
     //Optimize the last reads from each bucket, by taking the value instead of cloning it
     let mut last_reads: HashMap<String, &mut BucketId> = default();
-    for trans in ctx.out.iter_mut() {
-        for (kind, bucket) in trans.buckets_mut() {
+    for node in ctx.out.iter_mut() {
+        for (kind, bucket) in node.buckets_mut() {
             if kind.is_input() {
                 last_reads.insert(bucket.unwrap_name().to_string(), bucket);
             }
@@ -330,37 +363,41 @@ pub fn resolve_buckets(transforms: &[ConcreteTransform]) -> Result<Vec<Box<dyn T
             _ => panic!("unresolved bucket"),
         }
     }
+    //Prepare nodes, allowing them to modify themselves
+    for node in ctx.out.iter_mut() {
+        node.prepare()?;
+    }
     //Finally, unwrap the output
     Ok(ctx.out)
 }
 
 macro_rules! make_concrete {
-    ($($trans:ident,)*) => {
+    ($($node:ident,)*) => {
         #[derive(Debug, Clone, Serialize, Deserialize)]
-        pub enum ConcreteTransform {
-            $($trans($trans),)*
+        pub enum ConcreteNode {
+            $($node($node),)*
         }
-        impl ConcreteTransform {
-            pub fn into_dyn(self) -> Box<dyn Transform> {
+        impl ConcreteNode {
+            pub fn into_dyn(self) -> Box<dyn Node> {
                 match self {
                     $(
-                        ConcreteTransform::$trans(trans) => Box::new(trans),
+                        ConcreteNode::$node(node) => Box::new(node),
                     )*
                 }
             }
 
-            pub fn as_dyn(&self) -> &dyn Transform {
+            pub fn as_dyn(&self) -> &dyn Node {
                 match self {
                     $(
-                        ConcreteTransform::$trans(trans) => trans,
+                        ConcreteNode::$node(node) => node,
                     )*
                 }
             }
         }
         $(
-            impl From<$trans> for ConcreteTransform {
-                fn from(trans: $trans) -> Self {
-                    Self::$trans(trans)
+            impl From<$node> for ConcreteNode {
+                fn from(node: $node) -> Self {
+                    Self::$node(node)
                 }
             }
         )*
@@ -376,4 +413,6 @@ make_concrete!(
     SimfileFix,
     Rate,
     Space,
+    OsuLoad,
+    SimfileWrite,
 );

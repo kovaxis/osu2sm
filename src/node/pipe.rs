@@ -1,4 +1,4 @@
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -19,7 +19,7 @@ impl Default for Pipe {
     }
 }
 
-impl Transform for Pipe {
+impl Node for Pipe {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         if self.merge {
             let mut merged = Vec::new();

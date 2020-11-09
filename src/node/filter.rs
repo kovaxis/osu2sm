@@ -1,4 +1,4 @@
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -117,7 +117,7 @@ impl FilterOp {
     }
 }
 
-impl Transform for Filter {
+impl Node for Filter {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             list.retain(|sm| self.ops.iter().all(|(prop, op)| op.matches(&*prop.get(sm))));

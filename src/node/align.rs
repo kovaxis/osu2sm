@@ -1,4 +1,4 @@
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,7 +17,7 @@ impl Default for Align {
     }
 }
 
-impl Transform for Align {
+impl Node for Align {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             for sm in list.iter_mut() {

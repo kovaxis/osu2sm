@@ -1,4 +1,4 @@
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,7 +24,7 @@ impl Default for Remap {
     }
 }
 
-impl Transform for Remap {
+impl Node for Remap {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             for sm in list.iter_mut() {

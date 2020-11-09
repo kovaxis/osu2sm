@@ -2,7 +2,7 @@
 //!
 //! Fix them, ideally before outputting.
 
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -184,7 +184,7 @@ impl PreferDiff {
     }
 }
 
-impl Transform for SimfileFix {
+impl Node for SimfileFix {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         let process_list = |store: &mut SimfileStore, mut list: Vec<Box<Simfile>>| -> Result<()> {
             if let Some(conf) = &self.trim_diffs {
@@ -232,7 +232,10 @@ pub fn select_difficulties(conf: &TrimDiffs, simfiles: &mut Vec<Box<Simfile>>) -
     }
 
     //Make sure some rating system was used
-    ensure!(simfiles.iter().all(|sm| sm.difficulty_num.is_finite()), "cannot fix simfiles without a difficulty rating (use the `Rate` transform before `SimfileFix`)");
+    ensure!(
+        simfiles.iter().all(|sm| sm.difficulty_num.is_finite()),
+        "cannot fix simfiles without a difficulty rating (use the `Rate` node before `SimfileFix`)"
+    );
 
     //Create an auxiliary vec holding chart indices and difficulties
     let mut order = simfiles

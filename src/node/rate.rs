@@ -3,7 +3,7 @@
 //! Perhaps one day the groove meter and whatnot could be updated, but for now it's just
 //! in-practice BPM estimation.
 
-use crate::transform::prelude::*;
+use crate::node::prelude::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,16 +34,16 @@ impl Default for Rate {
         Self {
             from: default(),
             into: default(),
-            method: default(),
+            method: RateMethod::EffectiveBpm { exponent: 3. },
             scale: [0., 1., 0., 1.],
             set_meter: true,
             set_diff: vec![
-                (1., Beginner),
-                (2.5, Easy),
-                (5., Medium),
-                (7.5, Hard),
-                (10., Challenge),
-                (15., Edit),
+                (60., Beginner),
+                (100., Easy),
+                (140., Medium),
+                (180., Hard),
+                (220., Challenge),
+                (260., Edit),
             ],
         }
     }
@@ -59,7 +59,7 @@ impl Default for RateMethod {
     }
 }
 
-impl Transform for Rate {
+impl Node for Rate {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, mut list| {
             for sm in list.iter_mut() {
