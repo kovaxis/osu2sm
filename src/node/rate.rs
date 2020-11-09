@@ -34,8 +34,8 @@ impl Default for Rate {
         Self {
             from: default(),
             into: default(),
-            method: RateMethod::EffectiveBpm { exponent: 3. },
-            scale: [0., 1., 0., 1.],
+            method: RateMethod::Density(default()),
+            scale: [0., 1., 0., 60.],
             set_meter: true,
             set_diff: vec![
                 (60., Beginner),
@@ -51,28 +51,74 @@ impl Default for Rate {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RateMethod {
-    NoteCount {
-        /// Whether to take the logarithm of the amount of notes, instead of the raw amount
-        /// itself.
-        ///
-        /// More specifically, if `log` is greater than zero, take the logarithm base `log` of the
-        /// amount of non-tail notes.
-        #[serde(default)]
-        log: f64,
-    },
-    EffectiveBpm {
-        #[serde(default = "default_exponent")]
-        exponent: f64,
-    },
+    /// Use the raw total amount of non-tail notes.
+    Count(NoteCount),
+    /// Use a weighted norm of note densities, where each note may have several rectangular "halos".
+    ///
+    /// Outputs the density in note units / sec.
+    /// Scale `x60` to obtain effective BPM.
+    Density(NoteDensity),
+    /// Use the norm of the gaps between notes.
+    ///
+    /// Outputs the "average" note density in notes / sec.
+    /// Scale `x60` to obtain effective BPM.
+    Gap(NoteGap),
 }
 impl Default for RateMethod {
     fn default() -> Self {
-        Self::EffectiveBpm { exponent: 2. }
+        Self::Density(default())
     }
 }
 
-fn default_exponent() -> f64 {
-    3.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoteCount {
+    /// Whether to take the logarithm of the amount of notes, instead of the raw amount
+    /// itself.
+    ///
+    /// More specifically, if `log` is greater than zero, take the logarithm base `log` of the
+    /// amount of non-tail notes.
+    log: f64,
+}
+impl Default for NoteCount {
+    fn default() -> Self {
+        Self { log: 0. }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoteDensity {
+    /// A list of `(radius, weight)` pairs.
+    halos: Vec<(f64, f64)>,
+    /// A list of weights for each additional simultaneous note.
+    ///
+    /// If more than the length of this `Vec` simultaneous notes occur, the last weight (or `1` if
+    /// there are no weights) will be used.
+    simultaneous: Vec<f64>,
+    /// How much weight to give to short high densities over long low densities.
+    exponent: f64,
+}
+impl Default for NoteDensity {
+    fn default() -> Self {
+        Self {
+            halos: vec![(3., 0.), (0.5, 1.)],
+            simultaneous: vec![1., 0.75, 0.5],
+            exponent: 2.,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NoteGap {
+    /// How much weight to give to few very short gaps over many not-so-short gaps.
+    exponent: f64,
+}
+impl Default for NoteGap {
+    fn default() -> Self {
+        Self { exponent: 2. }
+    }
 }
 
 impl Node for Rate {
@@ -95,11 +141,9 @@ impl Node for Rate {
 
 fn rate(conf: &Rate, sm: &mut Simfile) -> Result<()> {
     let computed = match &conf.method {
-        RateMethod::NoteCount { log } => get_note_count(*log, sm),
-        RateMethod::EffectiveBpm { exponent } => {
-            // Get the in-practice BPM of this simfile.
-            get_practical_bpm(*exponent, sm)
-        }
+        RateMethod::Count(conf) => get_note_count(conf, sm),
+        RateMethod::Density(conf) => get_note_density(conf, sm),
+        RateMethod::Gap(conf) => get_note_gap(conf, sm),
     };
     let scaled = {
         let [in_min, in_max, out_min, out_max] = conf.scale;
@@ -118,22 +162,103 @@ fn rate(conf: &Rate, sm: &mut Simfile) -> Result<()> {
     Ok(())
 }
 
-fn get_note_count(log_base: f64, sm: &Simfile) -> f64 {
+fn get_note_count(conf: &NoteCount, sm: &Simfile) -> f64 {
     let mut count = 0;
     for note in sm.notes.iter() {
         if !note.is_tail() {
             count += 1;
         }
     }
-    if log_base > 0. {
-        (count as f64).log(log_base)
+    if conf.log > 0. {
+        (count as f64).log(conf.log)
     } else {
         count as f64
     }
 }
 
-fn get_practical_bpm(exp: f64, sm: &Simfile) -> f64 {
-    let exp = exp as f32;
+fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
+    let mut to_time = sm.beat_to_time();
+    let halo_densities = conf
+        .halos
+        .iter()
+        .map(|&(r, w)| (r, (w / (2. * r)) as f32))
+        .collect::<Vec<_>>();
+    let mut default_base_weight = 0.;
+    let mut default_key_weight = 1.;
+    let mut key_weights = Vec::with_capacity(conf.simultaneous.len());
+    {
+        let mut acc = 0.;
+        for &w in conf.simultaneous.iter() {
+            acc += w;
+            key_weights.push(acc as f32);
+            default_base_weight = acc as f32;
+            default_key_weight = w as f32;
+        }
+    }
+    let mut last_id: u64 = 0;
+    let mut weight_changes = Vec::with_capacity(2 * sm.notes.len() * conf.halos.len());
+    for (beat, start_idx, end_idx) in sm.iter_beats() {
+        let time = to_time.beat_to_time(beat);
+        //Calculate a weight for the notes on this beat
+        let mut note_count = 0;
+        for i in start_idx..end_idx {
+            if !sm.notes[i].is_tail() {
+                note_count += 1;
+            }
+        }
+        if note_count > 0 {
+            let weight = key_weights.get(note_count - 1).copied().unwrap_or_else(|| {
+                default_base_weight + default_key_weight * (note_count - key_weights.len()) as f32
+            });
+            //Create halos for this note weight
+            for &(r, d) in halo_densities.iter() {
+                last_id += 1;
+                weight_changes.push((time - r, last_id, weight * d));
+                weight_changes.push((time + r, last_id, f32::NAN));
+            }
+        }
+    }
+    weight_changes.sort_unstable_by_key(|(time, _id, _change)| SortableFloat(*time));
+    if weight_changes.is_empty() {
+        return 0.;
+    }
+    let mut total_density = 0.;
+    let mut cur_time = weight_changes[0].0;
+    let mut active_halos = Vec::new();
+    let mut total_time: f64 = 0.;
+    for (time, id, change) in weight_changes {
+        //Sum density
+        let mut cur_density: f32 = 0.;
+        for &(_halo_id, halo_density) in active_halos.iter() {
+            cur_density += halo_density;
+        }
+        let dt = time - cur_time;
+        total_density += dt as f32 * cur_density.powf(conf.exponent as f32);
+        if !active_halos.is_empty() {
+            total_time += dt;
+        }
+        //Update for next iteration
+        cur_time = time;
+        if change.is_nan() {
+            for i in 0..active_halos.len() {
+                if active_halos[i].0 == id {
+                    active_halos.remove(i);
+                    break;
+                }
+            }
+        } else {
+            active_halos.push((id, change));
+        }
+    }
+    if total_time > 0. {
+        (total_density as f64 / total_time).powf(1. / conf.exponent)
+    } else {
+        0.
+    }
+}
+
+fn get_note_gap(conf: &NoteGap, sm: &Simfile) -> f64 {
+    let exp = conf.exponent as f32;
     let mut last_time = None;
     let mut to_time = sm.beat_to_time();
     let mut total_freq = 0.;
@@ -156,5 +281,5 @@ fn get_practical_bpm(exp: f64, sm: &Simfile) -> f64 {
     } else {
         total_freq = (total_freq / total_gaps as f32).powf(1. / exp);
     }
-    (total_freq * 60.) as f64
+    total_freq as f64
 }
