@@ -5,7 +5,6 @@ use crate::node::prelude::*;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsuLoad {
-    pub into: BucketId,
     /// The input osu! song folder.
     pub input: String,
     /// Whether to attempt to automatically correct the path if it points to somewhere within an
@@ -18,6 +17,10 @@ pub struct OsuLoad {
     pub query_audio_len: bool,
     /// Which gamemodes to generate.
     pub gamemodes: Vec<Gamemode>,
+    /// Options for mania beatmaps.
+    pub mania: OsuMania,
+    /// Options for beatmaps converted from osu!standard.
+    pub standard: OsuStd,
     /// Whether to use the osu! unicode names or not.
     pub unicode: bool,
     /// Whether to use or ignore video files.
@@ -39,7 +42,6 @@ pub struct OsuLoad {
 impl Default for OsuLoad {
     fn default() -> Self {
         Self {
-            into: default(),
             input: "".into(),
             fix_input: true,
             offset: 0.,
@@ -60,6 +62,8 @@ impl Default for OsuLoad {
                     PnmNine,
                 ]
             },
+            mania: default(),
+            standard: default(),
             unicode: false,
             video: true,
             debug_allow_chance: 1.,
@@ -67,6 +71,41 @@ impl Default for OsuLoad {
             blacklist: vec![],
             whitelist: vec![],
             ignore_mode_errors: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OsuMania {
+    into: BucketId,
+}
+
+impl Default for OsuMania {
+    fn default() -> Self {
+        Self { into: default() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OsuStd {
+    into: BucketId,
+    keycount: i32,
+    weight_curve: Vec<(f32, f32)>,
+    dist_to_keycount: Vec<f64>,
+    /// How many notes to generate per spinner spin.
+    steps_per_spin: f64,
+}
+
+impl Default for OsuStd {
+    fn default() -> Self {
+        Self {
+            into: default(),
+            keycount: 4,
+            weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
+            dist_to_keycount: vec![0., 200., 350., 450.],
+            steps_per_spin: 1.,
         }
     }
 }
@@ -123,7 +162,10 @@ impl Node for OsuLoad {
         Ok(())
     }
     fn buckets_mut(&mut self) -> BucketIter {
-        Box::new(iter::once((BucketKind::Output, &mut self.into)))
+        Box::new(
+            iter::once((BucketKind::Output, &mut self.mania.into))
+                .chain(iter::once((BucketKind::Output, &mut self.standard.into))),
+        )
     }
     fn entry(
         &self,
@@ -178,20 +220,30 @@ fn scan_folder(
                 }
                 if !dir.is_empty() {
                     match process_beatmapset(conf, entry.path(), &dir[..]) {
-                        Ok(simfiles) => {
-                            store.global_set(
-                                "base",
-                                entry
-                                    .path()
-                                    .to_str()
-                                    .ok_or(anyhow!(
-                                        "non utf-8 beatmapset path \"{}\"",
-                                        entry.path().display()
-                                    ))?
-                                    .to_string(),
-                            );
-                            store.put(&conf.into, simfiles);
-                            on_bmset(store)?;
+                        Ok(mut simfiles) => {
+                            for (mode, simfiles) in simfiles.iter_mut().enumerate() {
+                                if simfiles.is_empty() {
+                                    continue;
+                                }
+                                store.global_set(
+                                    "base",
+                                    entry
+                                        .path()
+                                        .to_str()
+                                        .ok_or(anyhow!(
+                                            "non utf-8 beatmapset path \"{}\"",
+                                            entry.path().display()
+                                        ))?
+                                        .to_string(),
+                                );
+                                let bucket = match mode as i32 {
+                                    osufile::MODE_MANIA => &conf.mania.into,
+                                    osufile::MODE_STD => &conf.standard.into,
+                                    _ => panic!("mode {} is unimplemented", mode),
+                                };
+                                store.put(bucket, simfiles.drain(..));
+                                on_bmset(store)?;
+                            }
                         }
                         Err(e) => {
                             warn!(
@@ -227,24 +279,28 @@ fn process_beatmapset(
     conf: &OsuLoad,
     bmset_path: &Path,
     bm_paths: &[PathBuf],
-) -> Result<Vec<Box<Simfile>>> {
+) -> Result<[Vec<Box<Simfile>>; 4]> {
     info!("processing \"{}\":", bmset_path.display());
     //Parse and convert beatmaps
     let mut bmset_cache = BmsetCache::default();
-    let mut flat_simfiles = Vec::new();
+    let mut flat_simfiles = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     for bm_path in bm_paths {
-        let old_simfile_count = flat_simfiles.len();
-        let result = process_beatmap(conf, &mut bmset_cache, bmset_path, bm_path, |sm| {
-            flat_simfiles.push(sm)
+        let mut simfile_count = 0;
+        let result = process_beatmap(conf, &mut bmset_cache, bmset_path, bm_path, |mode, sm| {
+            simfile_count += 1;
+            flat_simfiles[mode].push(sm)
         });
         let bm_name = bm_path.file_name().unwrap_or_default().to_string_lossy();
         match result {
             Ok(()) => {
-                debug!(
-                    "  loaded beatmap \"{}\" successfully into {} simfiles",
-                    bm_name,
-                    flat_simfiles.len() as isize - old_simfile_count as isize,
-                );
+                if simfile_count <= 0 {
+                    warn!("  beatmap \"{}\" loaded, but produced no simfiles (check `OsuLoad` gamemodes)", bm_name);
+                } else {
+                    debug!(
+                        "  loaded beatmap \"{}\" successfully into {} simfiles",
+                        bm_name, simfile_count,
+                    );
+                }
             }
             Err(err) => {
                 if !conf.ignore_mode_errors || !err.to_string().contains("mode not supported") {
@@ -290,6 +346,7 @@ struct ConvCtx<'a> {
     cur_tp: TimingPoint,
     cur_beat: BeatPos,
     cur_beat_nonapproxed: f64,
+    inherited_multiplier: f64,
     last_time: f64,
     timing_points: &'a [TimingPoint],
     out_bpms: Vec<ControlPoint>,
@@ -313,6 +370,7 @@ impl ConvCtx<'_> {
             first_tp: first_tp,
             cur_beat: BeatPos::from(0.),
             cur_beat_nonapproxed: 0.,
+            inherited_multiplier: 1.,
             last_time: f64::NEG_INFINITY,
             timing_points: &bm.timing_points[..],
             out_bpms: Vec::new(),
@@ -348,6 +406,7 @@ impl ConvCtx<'_> {
             let next_tp = &self.timing_points[self.next_idx];
             if next_tp.beat_len <= 0. {
                 //Skip inherited timing points
+                self.inherited_multiplier = next_tp.beat_len / -100.;
             } else if time >= next_tp.time {
                 //Advance to this timing point
                 self.cur_beat_nonapproxed +=
@@ -355,6 +414,7 @@ impl ConvCtx<'_> {
                 //Arbitrary round-to-beat because of broken beatmaps
                 self.cur_beat = BeatPos::from(self.cur_beat_nonapproxed).round(2);
                 self.cur_tp = next_tp.clone();
+                self.inherited_multiplier = 1.;
                 self.out_bpms.push(ControlPoint {
                     beat: self.cur_beat,
                     beat_len: self.cur_tp.beat_len / 1000.,
@@ -380,6 +440,7 @@ impl ConvCtx<'_> {
         conf: &OsuLoad,
         bmset_cache: &mut BmsetCache,
         bmset_path: &Path,
+        bm_path: &Path,
         bm: &Beatmap,
         key_count: i32,
         mut out: impl FnMut(Box<Simfile>),
@@ -401,12 +462,14 @@ impl ConvCtx<'_> {
             (len - bm.preview_start / 1000.).max(10.)
         };
         // Create the final SM file in all supported gamemodes
+        let mut at_least_one = false;
         for gamemode in conf
             .gamemodes
             .iter()
             .copied()
             .filter(|gm| gm.key_count() == key_count as i32)
         {
+            at_least_one = true;
             out(Box::new(Simfile {
                 title: if conf.unicode {
                     bm.title_unicode.clone()
@@ -449,6 +512,13 @@ impl ConvCtx<'_> {
                 notes: self.out_notes.clone(),
             }));
         }
+        if !at_least_one {
+            warn!(
+                "  beatmap \"{}\" parsed correctly, but there are no compatible gamemodes with keycount {}",
+                bm_path.display(),
+                key_count
+            );
+        }
         Ok(())
     }
 }
@@ -458,33 +528,49 @@ fn process_beatmap(
     bmset_cache: &mut BmsetCache,
     bmset_path: &Path,
     bm_path: &Path,
-    out: impl FnMut(Box<Simfile>),
+    mut out: impl FnMut(usize, Box<Simfile>),
 ) -> Result<()> {
     let bm = Beatmap::parse(conf.offset, bm_path).context("read/parse beatmap file")?;
-    ensure!(
-        bm.mode == osufile::MODE_MANIA,
-        "mode not supported ({}) only mania (3) is currently supported",
-        bm.mode
-    );
+    let mut conv = ConvCtx::new(&bm)?;
+    let key_count = match bm.mode {
+        osufile::MODE_MANIA => process_mania(conf, &bm, &mut conv)?,
+        osufile::MODE_STD => process_standard(conf, &bm, &mut conv)?,
+        osufile::MODE_CATCH => bail!("mode not supported: catch the beat"),
+        osufile::MODE_TAIKO => bail!("mode not supported: taiko"),
+        unknown => bail!("mode not supported: unknown osu! gamemode {}", unknown),
+    };
+    //Finish up
+    conv.finish(
+        conf,
+        bmset_cache,
+        bmset_path,
+        bm_path,
+        &bm,
+        key_count,
+        |sm| out(bm.mode as usize, sm),
+    )
+}
+
+fn process_mania(_conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
     let key_count = bm.circle_size.round();
     ensure!(
         key_count.is_finite() && key_count >= 0. && key_count < 128.,
         "invalid keycount {}",
         key_count
     );
-    let mut conv = ConvCtx::new(&bm)?;
-    // Add hit objects as measure objects, pushing out SM notedata on the fly.
+    //Keep track of pending long note tails, and add them when it's time
     let mut pending_tails = Vec::new();
+    //Go through every osu! hit object
     for obj in bm.hit_objects.iter() {
         //Insert any pending long note tails
         pending_tails.retain(|&(time, key)| {
             if time <= obj.time {
-                // Insert now
+                //Insert now
                 let end_beat = conv.get_beat(time);
                 conv.push_note(end_beat, key, Note::KIND_TAIL);
                 false
             } else {
-                // Keep waiting
+                //Keep waiting
                 true
             }
         });
@@ -499,9 +585,9 @@ fn process_beatmap(
         );
         let obj_key = obj_key as i32;
         //Act depending on object type
-        if obj.ty & osufile::TYPE_HOLD != 0 {
-            // Long note
-            // Get the end time in millis
+        if obj.ty & osufile::TYPE_LONG != 0 {
+            //Long note
+            //Get the end time in millis
             let end_time = obj
                 .extras
                 .split(':')
@@ -514,24 +600,193 @@ fn process_beatmap(
                         obj.extras
                     )
                 })?;
-            // Leave it for later insertion at the correct time
+            //Leave it for later insertion at the correct time
             let insert_idx = pending_tails
                 .iter()
                 .position(|(t, _)| *t > end_time)
                 .unwrap_or(pending_tails.len());
             pending_tails.insert(insert_idx, (end_time, obj_key));
-            // Insert the long note head
+            //Insert the long note head
             conv.push_note(obj_beat, obj_key, Note::KIND_HEAD);
         } else if obj.ty & osufile::TYPE_HIT != 0 {
-            // Hit note
+            //Hit note
             conv.push_note(obj_beat, obj_key, Note::KIND_HIT);
         }
     }
     // Push out any pending long note tails
     for (time, key) in pending_tails {
         let end_beat = conv.get_beat(time);
-        conv.push_note(end_beat, key, '3');
+        conv.push_note(end_beat, key, Note::KIND_TAIL);
     }
-    //Finish up
-    conv.finish(conf, bmset_cache, bmset_path, &bm, key_count as i32, out)
+    Ok(key_count as i32)
+}
+
+fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
+    use crate::node::remap::KeyAlloc;
+
+    let key_count = conf.standard.keycount;
+    ensure!(key_count > 0, "keycount must be greater than 0");
+    let key_count = key_count as usize;
+    let mut key_alloc = KeyAlloc::new(&conf.standard.weight_curve, key_count);
+    let mut rng = FastRng::seed_from_u64(fxhash::hash64(&(
+        &bm.title,
+        &bm.artist,
+        &bm.version,
+        bm.set_id,
+        bm.id,
+        "osuload-std",
+    )));
+
+    let get_key_count = |last_pos: Option<(f64, f64)>, cur_pos: (f64, f64)| -> usize {
+        let (x, y) = cur_pos;
+        let (last_x, last_y) = last_pos.unwrap_or(cur_pos);
+        let (dx, dy) = (x - last_x, y - last_y);
+        let dist_sq = dx * dx + dy * dy;
+        conf.standard
+            .dist_to_keycount
+            .iter()
+            .rposition(|&min_dist| dist_sq >= min_dist * min_dist)
+            .map(|idx| idx + 1)
+            .unwrap_or(0)
+    };
+
+    let mut tmp_choose_vec = Vec::with_capacity(key_count);
+    let mut last_pos = None;
+    for obj in bm.hit_objects.iter() {
+        let beat = conv.get_beat(obj.time);
+        if obj.ty & osufile::TYPE_HIT != 0 {
+            //Create a chord from a single hit
+            let keys = get_key_count(last_pos, (obj.x, obj.y));
+            if keys > 0 {
+                tmp_choose_vec.clear();
+                tmp_choose_vec.extend(0..key_count);
+                for _ in 0..keys {
+                    if let Some(out_key) =
+                        key_alloc.alloc(&tmp_choose_vec, obj.time / 1000., &mut rng)
+                    {
+                        let pos = tmp_choose_vec.iter().position(|&k| k == out_key).unwrap();
+                        tmp_choose_vec.remove(pos);
+                        conv.push_note(beat, out_key as i32, Note::KIND_HIT);
+                    } else {
+                        break;
+                    }
+                }
+                last_pos = Some((obj.x, obj.y));
+            }
+        } else if obj.ty & osufile::TYPE_SLIDER != 0 {
+            //Create a hold chord from a single slider
+            let keys = get_key_count(last_pos, (obj.x, obj.y));
+            if keys > 0 {
+                //Parse slider properties
+                let mut extras = obj.extras.split(',');
+                let curve = extras.next().unwrap_or_default();
+                let slides = extras
+                    .next()
+                    .unwrap_or_default()
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        anyhow!("invalid spinner extras \"{}\", expected slides", obj.extras)
+                    })? as usize;
+                let length_pixels =
+                    extras
+                        .next()
+                        .unwrap_or_default()
+                        .parse::<f64>()
+                        .map_err(|_| {
+                            anyhow!("invalid spinner extras \"{}\", expected length", obj.extras)
+                        })?;
+                //Do each slider section
+                let beat_len = BeatPos::from(
+                    length_pixels / (100. * bm.slider_multiplier) * conv.inherited_multiplier,
+                );
+                let mut next_start_beat = beat;
+                for _ in 0..slides {
+                    //Add head notes
+                    tmp_choose_vec.clear();
+                    tmp_choose_vec.extend(0..key_count);
+                    let mut available_keys = key_count;
+                    for _ in 0..keys {
+                        if let Some(out_key) = key_alloc.alloc(
+                            &tmp_choose_vec[..available_keys],
+                            obj.time / 1000.,
+                            &mut rng,
+                        ) {
+                            let pos = tmp_choose_vec[..available_keys]
+                                .iter()
+                                .position(|&k| k == out_key)
+                                .unwrap();
+                            tmp_choose_vec[pos..].rotate_left(1);
+                            available_keys -= 1;
+                            //Push head note
+                            conv.push_note(next_start_beat, out_key as i32, Note::KIND_HEAD);
+                        } else {
+                            break;
+                        }
+                    }
+                    //Advance beat
+                    next_start_beat += beat_len;
+                    //Add tails
+                    for i in available_keys..key_count {
+                        conv.push_note(next_start_beat, tmp_choose_vec[i] as i32, Note::KIND_TAIL);
+                    }
+                }
+                //TODO: Use actual curve to determine the end of the slider
+                last_pos = Some((obj.x, obj.y));
+            }
+        } else if obj.ty & osufile::TYPE_SPINNER != 0 {
+            //Convert spinners to stairs
+            //Parse spinner endtime
+            let end_time = obj
+                .extras
+                .split(',')
+                .next()
+                .unwrap_or_default()
+                .parse::<f64>()
+                .map_err(|_| {
+                    anyhow!(
+                        "invalid spinner extras \"{}\", expected endTime",
+                        obj.extras
+                    )
+                })?;
+            let end_beat = conv.get_beat(end_time);
+            //Taken from the osu! wiki
+            let spins_per_sec = if bm.overall_difficulty < 5. {
+                5. - 2. * (5. - bm.overall_difficulty) / 5.
+            } else {
+                5. + 2.5 * (bm.overall_difficulty - 5.) / 5.
+            };
+            let spins = (end_time - obj.time) / 1000. * spins_per_sec;
+            let steps_approx = (spins * conf.standard.steps_per_spin).max(1.);
+            let beat_step = BeatPos::from(
+                2f64.powi(
+                    ((end_beat - beat).as_num() / steps_approx)
+                        .max(1. / 16.)
+                        .log2()
+                        .round() as i32,
+                ),
+            );
+            //Create stair steps
+            tmp_choose_vec.clear();
+            tmp_choose_vec.extend(0..key_count);
+            let mut next_key = key_alloc
+                .alloc(&tmp_choose_vec, obj.time / 1000., &mut rng)
+                .unwrap() as i32;
+            let dir = if rng.gen() { 1 } else { -1 };
+            let mut next_beat = beat;
+            while next_beat <= end_beat {
+                conv.push_note(next_beat, next_key, Note::KIND_HIT);
+                next_beat += beat_step;
+                next_key = (next_key + dir).rem_euclid(key_count as i32);
+            }
+            last_pos = None;
+        }
+    }
+
+    trace!(
+        "generated {} osu! standard notes from {} hitobjects",
+        conv.out_notes.len(),
+        bm.hit_objects.len()
+    );
+
+    Ok(key_count as i32)
 }

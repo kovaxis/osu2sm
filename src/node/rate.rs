@@ -89,7 +89,7 @@ impl Default for NoteCount {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NoteDensity {
-    /// A list of `(radius, weight)` pairs.
+    /// A list of `(duration, weight)` pairs.
     halos: Vec<(f64, f64)>,
     /// A list of weights for each additional simultaneous note.
     ///
@@ -102,7 +102,7 @@ pub struct NoteDensity {
 impl Default for NoteDensity {
     fn default() -> Self {
         Self {
-            halos: vec![(3., 0.), (0.5, 1.)],
+            halos: vec![(2., 0.), (1., 1.)],
             simultaneous: vec![1., 0.75, 0.5],
             exponent: 2.,
         }
@@ -181,7 +181,7 @@ fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
     let halo_densities = conf
         .halos
         .iter()
-        .map(|&(r, w)| (r, (w / (2. * r)) as f32))
+        .map(|&(duration, weight)| (duration / 2., (weight / duration) as f32))
         .collect::<Vec<_>>();
     let mut default_base_weight = 0.;
     let mut default_key_weight = 1.;
@@ -195,7 +195,7 @@ fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
             default_key_weight = w as f32;
         }
     }
-    let mut last_id: u64 = 0;
+    let mut last_id: u32 = 0;
     let mut weight_changes = Vec::with_capacity(2 * sm.notes.len() * conf.halos.len());
     for (beat, start_idx, end_idx) in sm.iter_beats() {
         let time = to_time.beat_to_time(beat);
@@ -211,10 +211,10 @@ fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
                 default_base_weight + default_key_weight * (note_count - key_weights.len()) as f32
             });
             //Create halos for this note weight
-            for &(r, d) in halo_densities.iter() {
+            for &(radius, density) in halo_densities.iter() {
                 last_id += 1;
-                weight_changes.push((time - r, last_id, weight * d));
-                weight_changes.push((time + r, last_id, f32::NAN));
+                weight_changes.push((time - radius, last_id, weight * density));
+                weight_changes.push((time + radius, last_id, f32::NAN));
             }
         }
     }
@@ -224,6 +224,8 @@ fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
     }
     let mut total_density = 0.;
     let mut cur_time = weight_changes[0].0;
+    // OPTIMIZE: Use fixed-point for density, keeping track of `cur_density` without keeping track
+    // of individual halos. Fixed-point would allow for the needed precision.
     let mut active_halos = Vec::new();
     let mut total_time: f64 = 0.;
     for (time, id, change) in weight_changes {

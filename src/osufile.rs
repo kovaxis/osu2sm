@@ -306,4 +306,4 @@ pub const MODE_MANIA: i32 = 3;
 pub const TYPE_HIT: u32 = 1 << 0;
 pub const TYPE_SLIDER: u32 = 1 << 1;
 pub const TYPE_SPINNER: u32 = 1 << 3;
-pub const TYPE_HOLD: u32 = 1 << 7;
+pub const TYPE_LONG: u32 = 1 << 7;
