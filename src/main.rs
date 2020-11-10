@@ -71,8 +71,11 @@ pub mod simfile;
 struct Opts {
     /// A graph of nodes to load, transform and save simfiles.
     nodes: Vec<ConcreteNode>,
+    /// Whether to carry out redundant sanity checks.
+    /// (Will likely error on kinda-correct, mistimed and simultaneous-slider beatmaps).
+    sanity_check: bool,
     /// A logspec string (see
-    // https://https://docs.rs/flexi_logger/0.16.1/flexi_logger/struct.LogSpecification.html).
+    /// https://https://docs.rs/flexi_logger/0.16.1/flexi_logger/struct.LogSpecification.html).
     log: String,
     /// Whether to log to a file.
     log_file: bool,
@@ -104,6 +107,7 @@ impl Default for Opts {
                 }
                 .into(),
             ],
+            sanity_check: false,
             log: "info".to_string(),
             log_file: true,
             log_stderr: true,
@@ -140,37 +144,10 @@ impl Opts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DebugOpts {
-    allow_chance: f64,
-    allow_seed: u64,
-    /// Entries must be lowercase.
-    blacklist: Vec<String>,
-    /// Entries must be lowercase.
-    whitelist: Vec<String>,
-}
-impl Default for DebugOpts {
-    fn default() -> Self {
-        Self {
-            allow_chance: 1.,
-            allow_seed: 0,
-            blacklist: vec![],
-            whitelist: vec![],
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
-enum CopyMethod {
-    Hardlink,
-    Symlink,
-    Copy,
-}
-
 struct Ctx {
     sm_store: RefCell<SimfileStore>,
     nodes: Vec<Box<dyn Node>>,
+    opts: Opts,
 }
 
 fn run_nodes(ctx: &Ctx) -> Result<()> {
@@ -179,6 +156,9 @@ fn run_nodes(ctx: &Ctx) -> Result<()> {
         store.reset();
         node.entry(&mut *store, &mut |store| {
             for node in ctx.nodes.iter().skip(i + 1) {
+                if ctx.opts.sanity_check {
+                    store.check()?;
+                }
                 trace!("  applying node {:?}", node);
                 node.apply(store)?;
             }
@@ -407,6 +387,7 @@ fn run() -> Result<()> {
     let ctx = Ctx {
         sm_store: RefCell::new(default()),
         nodes: node::resolve_buckets(&opts.nodes).context("failed to resolve nodes")?,
+        opts,
     };
     run_nodes(&ctx)?;
     Ok(())

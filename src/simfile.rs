@@ -204,6 +204,134 @@ impl Simfile {
         }
         Ok(())
     }
+
+    /// Sanity-check a simfile.
+    ///
+    /// These checks prioritize correctness over speed, and as such should only be used for
+    /// debugging purposes.
+    pub fn check(&self) -> Result<()> {
+        (|| {
+            let key_count = self.gamemode.key_count() as usize;
+            //Basic control point checks
+            let mut last_beat = BeatPos::from(0.) - BeatPos::EPSILON;
+            ensure!(!self.bpms.is_empty(), "no control points");
+            for cp in self.bpms.iter() {
+                ensure!(
+                    cp.beat != last_beat,
+                    "two control points at beat {}",
+                    last_beat
+                );
+                ensure!(
+                    cp.beat > last_beat,
+                    "control point beats do not increase monotonically ({} < {})",
+                    cp.beat,
+                    last_beat
+                );
+                ensure!(
+                    cp.beat_len.is_finite() && cp.beat_len > 0.,
+                    "control point beatlength ({}) is not a positive real",
+                    cp.beat_len
+                );
+                last_beat = cp.beat;
+            }
+            //Check a single beat
+            let mut beat_notes = vec![false; key_count];
+            let mut beat_tails = vec![false; key_count];
+            let mut check_beat = |beat, start_idx: usize, end_idx: usize| -> Result<()> {
+                for n in beat_notes.iter_mut() {
+                    *n = false;
+                }
+                for t in beat_tails.iter_mut() {
+                    *t = false;
+                }
+                for idx in start_idx..end_idx {
+                    let key = self.notes[idx].key as usize;
+                    if self.notes[idx].is_tail() {
+                        ensure!(
+                            !beat_tails[key],
+                            "two tails on beat {}, key {} (beat {:?})",
+                            beat,
+                            key,
+                            &self.notes[start_idx..end_idx]
+                        );
+                        beat_tails[key] = true;
+                    } else {
+                        ensure!(
+                            !beat_notes[key],
+                            "two hit/head notes on beat {}, key {} (beat {:?})",
+                            beat,
+                            key,
+                            &self.notes[start_idx..end_idx]
+                        );
+                        beat_notes[key] = true;
+                    }
+                }
+                Ok(())
+            };
+            //Note sanity checks
+            let mut last_beat = BeatPos::from(0.);
+            let mut last_beat_start = 0;
+            for (idx, note) in self.notes.iter().enumerate() {
+                //Individual note checks
+                ensure!(
+                    note.beat >= last_beat,
+                    "note beats do not increase monotonically ({} < {})",
+                    note.beat,
+                    last_beat
+                );
+                ensure!(
+                    note.is_hit() || note.is_head() || note.is_tail(),
+                    "unknown note kind '{}'",
+                    note.kind
+                );
+                ensure!(note.key >= 0, "note key ({}) is negative", note.key);
+                ensure!(
+                    note.key < key_count as i32,
+                    "note key is not less than key-count-for-gamemode-{:?}: {} >= {}",
+                    self.gamemode,
+                    note.key,
+                    key_count
+                );
+                //Check an entire beat
+                if last_beat != note.beat {
+                    check_beat(last_beat, last_beat_start, idx)?;
+                    last_beat = note.beat;
+                    last_beat_start = idx;
+                }
+                //Check hold notes
+                if note.is_head() {
+                    //Search for its tail
+                    let mut found = false;
+                    for j in idx+1..self.notes.len() {
+                        let next_note = &self.notes[j];
+                        if next_note.key == note.key {
+                            ensure!(next_note.is_tail(), "hold head at beat {}, key {} is followed by non-tail (kind '{}') at beat {}", note.beat, note.key, next_note.kind, next_note.beat);
+                            ensure!(next_note.beat != note.beat, "zero-length hold note at beat {}, key {}", note.beat, note.key);
+                            found = true;
+                            break;
+                        }
+                    }
+                    ensure!(found, "head at beat {}, key {}, index {} has no matching tail", note.beat, note.key, idx);
+                }else if note.is_tail() {
+                    //Search for its head
+                    let mut found = false;
+                    for j in (0..idx).rev() {
+                        let prev_note = &self.notes[j];
+                        if prev_note.key == note.key {
+                            ensure!(prev_note.is_head(), "hold tail at beat {}, key {} is preceded by non-head (kind '{}') at beat {}", note.beat, note.key, prev_note.kind, prev_note.beat);
+                            found = true;
+                            break;
+                        }
+                    }
+                    ensure!(found, "tail at beat {}, key {}, index {} has no matching head", note.beat, note.key, idx);
+                }
+            }
+            //Check the last remaining beat
+            check_beat(last_beat, last_beat_start, self.notes.len())?;
+            Ok(())
+        })()
+        .context("simfile sanity check failed")
+    }
 }
 
 fn write_measure(

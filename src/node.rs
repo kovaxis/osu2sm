@@ -189,6 +189,21 @@ impl SimfileStore {
             .or_default()
             .put_list(simfiles);
     }
+
+    pub fn check(&self) -> Result<()> {
+        for (bucket_name, bucket) in self.by_name.iter() {
+            for (idx, sm) in bucket.simfiles.iter().enumerate() {
+                sm.check().with_context(|| {
+                    anyhow!(
+                        "simfile {} at bucket \"{}\" failed the sanity check",
+                        idx,
+                        bucket_name
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
