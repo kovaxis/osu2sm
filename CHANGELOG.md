@@ -15,3 +15,5 @@
 - Change `in_place_from` to `in_place` and make a boolean instead of an `Option`.
 - Configurable control point snapping. Ideally, we want a "smart" mode that checks whether "almost
     all" control points are aligned, and to enable rounding in that case.
+- Improve timing in cases where timing points are off-beat, but are intended to reset the beat.
+    In these cases, add fake control points with modified BPM, intended to line up the beat again.

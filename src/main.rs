@@ -162,6 +162,9 @@ fn run_nodes(ctx: &Ctx) -> Result<()> {
                 trace!("  applying node {:?}", node);
                 node.apply(store)?;
             }
+            if ctx.opts.sanity_check {
+                store.check()?;
+            }
             Ok(())
         })?;
     }

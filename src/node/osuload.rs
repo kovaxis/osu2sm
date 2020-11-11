@@ -717,9 +717,10 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
                         .map_err(|_| {
                             anyhow!("invalid spinner extras \"{}\", expected length", obj.extras)
                         })?;
-                //The length of _the entire_ slider
+                //The length of _the entire_ slider, factoring in multiple slides
                 let beat_len = BeatPos::from(
-                    length_pixels / (100. * bm.slider_multiplier) * conv.inherited_multiplier,
+                    slides as f64 * length_pixels / (100. * bm.slider_multiplier)
+                        * conv.inherited_multiplier,
                 );
                 if beat_len.as_num() / (slides as f64) < conf.standard.min_slider_bounce {
                     slides = (beat_len.as_num() / conf.standard.min_slider_bounce).round() as usize;
