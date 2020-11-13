@@ -37,6 +37,12 @@ pub struct OsuLoad {
     pub whitelist: Vec<String>,
     /// Whether to ignore "incompatible mode" errors, which may be _too_ numerous.
     pub ignore_mode_errors: bool,
+    /// What fraction of a beat do osu! timing points mark.
+    /// Several alternatives can be given, which will be tried from first to last until there are
+    /// no timing point conflicts or no more roundings are available.
+    ///
+    /// If no roundings are supplied, it is equivalent to `vec![0.]` (no rounding at all).
+    pub rounding: Vec<f64>,
 }
 
 impl Default for OsuLoad {
@@ -71,6 +77,7 @@ impl Default for OsuLoad {
             blacklist: vec![],
             whitelist: vec![],
             ignore_mode_errors: true,
+            rounding: vec![4., 1., 0.5, 0.25, 0.125, 0.],
         }
     }
 }
@@ -79,11 +86,16 @@ impl Default for OsuLoad {
 #[serde(default)]
 pub struct OsuMania {
     into: BucketId,
+    /// Whether to check the error in milliseconds introduced by the conversion/quantization.
+    check_error: bool,
 }
 
 impl Default for OsuMania {
     fn default() -> Self {
-        Self { into: default() }
+        Self {
+            into: default(),
+            check_error: false,
+        }
     }
 }
 
@@ -350,54 +362,106 @@ impl BmsetCache {
 }
 
 struct ConvCtx<'a> {
-    next_idx: usize,
-    first_tp: TimingPoint,
     cur_tp: TimingPoint,
+    rest_tp: &'a [TimingPoint],
+    cur_time: f64,
     cur_beat: BeatPos,
-    cur_beat_nonapproxed: f64,
+    rounding: BeatPos,
     inherited_multiplier: f64,
-    last_time: f64,
-    timing_points: &'a [TimingPoint],
+    out_beatlen_range: (f64, f64),
+    out_offset: f64,
     out_bpms: Vec<ControlPoint>,
     out_notes: Vec<Note>,
 }
 impl ConvCtx<'_> {
-    fn new(bm: &Beatmap) -> Result<ConvCtx> {
-        let first_tp = bm
-            .timing_points
+    fn new<'a>(conf: &OsuLoad, bm: &'a Beatmap) -> Result<ConvCtx<'a>> {
+        //Find the last absolute timing point before the first hitobject
+        //If there are no absolute timing points before it, use the first absolute timing point
+        //If there are no absolute timing points, well, there is nothing to do
+        let first_hit_time = bm
+            .hit_objects
             .first()
-            .ok_or(anyhow!("no timing points"))?
-            .clone();
-        ensure!(
-            first_tp.beat_len > 0.,
-            "beatLength of first timing point must be positive (is {})",
-            first_tp.beat_len
-        );
-        let mut conv = ConvCtx {
-            next_idx: 1,
-            cur_tp: first_tp.clone(),
-            first_tp: first_tp,
-            cur_beat: BeatPos::from(0.),
-            cur_beat_nonapproxed: 0.,
-            inherited_multiplier: 1.,
-            last_time: f64::NEG_INFINITY,
-            timing_points: &bm.timing_points[..],
-            out_bpms: Vec::new(),
-            out_notes: Vec::new(),
-        };
-        // Adjust for hit objects that occur before the first timing point by adding another timing
-        // point even earlier.
-        if let Some(first_hit) = bm.hit_objects.first() {
-            while first_hit.time < conv.first_tp.time {
-                conv.first_tp.time -= conv.first_tp.beat_len * conv.first_tp.meter as f64;
+            .map(|hit| hit.time)
+            .unwrap_or(bm.timing_points[0].time);
+        let first_tp_idx = {
+            let mut first_noninherited = None;
+            let mut last_before_start = None;
+            for (idx, tp) in bm.timing_points.iter().enumerate() {
+                if tp.beat_len > 0. {
+                    first_noninherited.get_or_insert(idx);
+                    if tp.time <= first_hit_time {
+                        last_before_start.get_or_insert(idx);
+                    }
+                }
             }
-            conv.cur_tp = conv.first_tp.clone();
-            conv.out_bpms.push(ControlPoint {
-                beat: BeatPos::from(0.),
-                beat_len: conv.first_tp.beat_len / 1000.,
-            });
+            last_before_start.or(first_noninherited).ok_or_else(|| {
+                anyhow!(
+                    "no non-inherited timing points found (timing points: {:?})",
+                    bm.timing_points
+                )
+            })?
+        };
+
+        //Match the time of the first timing point to the time of the first hitobject
+        let first_tp = {
+            let mut first_tp = bm.timing_points[first_tp_idx].clone();
+            let round_to = first_tp.beat_len * first_tp.meter as f64;
+            first_tp.time += ((first_hit_time - first_tp.time) / round_to).floor() * round_to;
+            first_tp
+        };
+        trace!(
+            "    first tp at {}, with time {}",
+            first_tp_idx,
+            first_tp.time
+        );
+
+        //Now figure out the rounding of these timing points
+        let mut final_rounding = None;
+        for &rounding in conf.rounding.iter() {
+            let round_to = BeatPos::from(rounding);
+            let mut cur_tp = &first_tp;
+            let mut cur_beat = BeatPos::from(0.);
+            let mut no_aliasing = true;
+            for tp in bm.timing_points[first_tp_idx + 1..].iter() {
+                if tp.beat_len > 0. {
+                    let last_beat = cur_beat;
+                    let beat_adv =
+                        BeatPos::from((tp.time - cur_tp.time) / cur_tp.beat_len).round(round_to);
+                    cur_beat += beat_adv;
+                    //Make sure there is no aliasing
+                    if tp.time != cur_tp.time && cur_beat == last_beat {
+                        no_aliasing = false;
+                        break;
+                    }
+                    cur_tp = tp;
+                }
+            }
+            if no_aliasing {
+                final_rounding = Some(round_to);
+                break;
+            }
         }
-        Ok(conv)
+        let final_rounding = final_rounding.unwrap_or(BeatPos::from(0.));
+
+        //Create first control point
+        let first_controlpoint = ControlPoint {
+            beat: BeatPos::from(0.),
+            beat_len: first_tp.beat_len / 1000.,
+        };
+
+        //Create context object
+        Ok(ConvCtx {
+            rest_tp: &bm.timing_points[first_tp_idx + 1..],
+            cur_time: first_tp.time,
+            cur_beat: BeatPos::from(0.),
+            rounding: final_rounding,
+            inherited_multiplier: 1.,
+            out_beatlen_range: (first_tp.beat_len, first_tp.beat_len),
+            out_offset: first_tp.time / -1000.,
+            out_bpms: vec![first_controlpoint],
+            out_notes: Vec::new(),
+            cur_tp: first_tp,
+        })
     }
 
     /// Convert from a point in time to a snapped beat number, taking into account changing BPM.
@@ -409,33 +473,86 @@ impl ConvCtx<'_> {
             "object must monotonically increase in time",
         );
         */
-        self.last_time = time;
         //Advance timing points
-        while self.next_idx < self.timing_points.len() {
-            let next_tp = &self.timing_points[self.next_idx];
+        while let Some(next_tp) = self.rest_tp.first() {
             if time >= next_tp.time {
                 if next_tp.beat_len <= 0. {
                     //Inherited timing points are only cosmetic (and they alter slider lengths)
                     self.inherited_multiplier = next_tp.beat_len / -100.;
                 } else {
                     //Advance to this timing point
-                    self.cur_beat_nonapproxed +=
-                        (next_tp.time - self.cur_tp.time) / self.cur_tp.beat_len;
-                    self.cur_beat = BeatPos::from(self.cur_beat_nonapproxed);
+                    let raw_beat_adv = (next_tp.time - self.cur_time) / self.cur_tp.beat_len;
+                    let beat_adv = BeatPos::from(raw_beat_adv).ceil(self.rounding);
+                    let tp_beat = self.cur_beat + beat_adv;
+                    let mut tp_time = self.cur_time + beat_adv.as_num() * self.cur_tp.beat_len;
+                    if (tp_time - next_tp.time).abs() >= 4. {
+                        let last_beat = self
+                            .out_notes
+                            .last()
+                            .map(|note| note.beat)
+                            .unwrap_or(BeatPos::from(0.))
+                            .max(self.cur_beat);
+                        let pivot_max = self.cur_beat + BeatPos::from_num_ceil(raw_beat_adv);
+                        let mut pivot = None;
+                        for &beat_gap in [
+                            BeatPos::from(1.),
+                            BeatPos::from(0.5),
+                            BeatPos::from(0.25),
+                            BeatPos::from(1. / 8.),
+                            BeatPos::from(1. / 16.),
+                            BeatPos::EPSILON,
+                        ]
+                        .iter()
+                        {
+                            let potential_pivot = pivot_max.ceil(beat_gap) - beat_gap;
+                            if potential_pivot >= last_beat {
+                                pivot = Some(potential_pivot);
+                                break;
+                            }
+                        }
+                        if let Some(pivot) = pivot {
+                            let target_time = next_tp.time - self.cur_time;
+                            let time_to_pivot =
+                                (pivot - self.cur_beat).as_num() * self.cur_tp.beat_len;
+                            let consume_time = target_time - time_to_pivot;
+                            let consume_beats = tp_beat - pivot;
+                            let beat_len = consume_time / consume_beats.as_num();
+                            self.out_bpms.push(ControlPoint {
+                                beat: pivot,
+                                beat_len: beat_len / 1000.,
+                            });
+                            tp_time = self.cur_time
+                                + (pivot - self.cur_beat).as_num() * self.cur_tp.beat_len
+                                + (tp_beat - pivot).as_num() * beat_len;
+                            trace!(
+                                "      corrected bpm by inserting {}ms/beat control point at beat {}",
+                                beat_len,
+                                pivot
+                            );
+                        } else {
+                            warn!("found no bpm correction pivot for timing points {:?} -> {:?}: last_beat = {}, pivot_max = {}", self.cur_tp, next_tp, last_beat, pivot_max);
+                        }
+                    }
+                    trace!("      advancing from timing point at beat {}, time {}, to beat {} ({:?} -> {:?})", self.cur_beat, self.cur_time, tp_beat, self.cur_tp, next_tp);
+                    self.cur_beat = tp_beat;
+                    self.cur_time = tp_time;
                     self.cur_tp = next_tp.clone();
                     self.inherited_multiplier = 1.;
                     self.out_bpms.push(ControlPoint {
                         beat: self.cur_beat,
                         beat_len: self.cur_tp.beat_len / 1000.,
                     });
+                    self.out_beatlen_range.0 = self.out_beatlen_range.0.min(self.cur_tp.beat_len);
+                    self.out_beatlen_range.1 = self.out_beatlen_range.1.max(self.cur_tp.beat_len);
                 }
-                self.next_idx += 1;
+                self.rest_tp = &self.rest_tp[1..];
             } else {
                 //Still within the current timing point
                 break;
             }
         }
         //Use the current timing point to determine note beat
+        //Do not use `cur_time`; it is only used as an error accumulator
         self.cur_beat + BeatPos::from((time - self.cur_tp.time) / self.cur_tp.beat_len)
     }
 
@@ -509,11 +626,21 @@ impl ConvCtx<'_> {
                 lyrics: None,
                 cdtitle: None,
                 music: Some(bm.audio.clone().into()),
-                offset: self.first_tp.time / -1000.,
+                offset: self.out_offset,
                 bpms: self.out_bpms.clone(),
                 stops: vec![],
                 sample_start: Some(bm.preview_start / 1000.),
                 sample_len: Some(sample_len),
+                display_bpm: if self.out_beatlen_range.0 == self.out_beatlen_range.1 {
+                    DisplayBpm::Single(60000. / self.out_beatlen_range.0)
+                } else {
+                    //Use `.1` for the lower bound and `.0` for the higher bound, because lower
+                    //beatlens imply higher BPMs
+                    DisplayBpm::Range(
+                        60000. / self.out_beatlen_range.1,
+                        60000. / self.out_beatlen_range.0,
+                    )
+                },
                 gamemode,
                 desc: bm.version.clone(),
                 difficulty: Difficulty::Edit,
@@ -541,7 +668,7 @@ fn process_beatmap(
     mut out: impl FnMut(usize, Box<Simfile>),
 ) -> Result<()> {
     let bm = Beatmap::parse(conf.offset, bm_path).context("read/parse beatmap file")?;
-    let mut conv = ConvCtx::new(&bm)?;
+    let mut conv = ConvCtx::new(conf, &bm)?;
     let key_count = match bm.mode {
         osufile::MODE_MANIA => process_mania(conf, &bm, &mut conv)?,
         osufile::MODE_STD => process_standard(conf, &bm, &mut conv)?,
@@ -561,7 +688,7 @@ fn process_beatmap(
     )
 }
 
-fn process_mania(_conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
+fn process_mania(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
     let key_count = bm.circle_size.round();
     ensure!(
         key_count.is_finite() && key_count >= 0. && key_count < 128.,
@@ -632,6 +759,104 @@ fn process_mania(_conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i3
     for (time, key) in pending_tails {
         let end_beat = conv.get_beat(time);
         conv.push_note(end_beat, key, Note::KIND_TAIL);
+    }
+    //Check precision
+    if conf.mania.check_error {
+        let sm = Simfile {
+            title: default(),
+            artist: default(),
+            subtitle: default(),
+            title_trans: default(),
+            artist_trans: default(),
+            subtitle_trans: default(),
+            genre: default(),
+            credit: default(),
+            banner: default(),
+            background: default(),
+            lyrics: default(),
+            cdtitle: default(),
+            music: default(),
+            offset: conv.out_offset,
+            bpms: conv.out_bpms.clone(),
+            stops: default(),
+            sample_start: default(),
+            sample_len: default(),
+            display_bpm: DisplayBpm::Random,
+            gamemode: Gamemode::DanceSingle,
+            desc: default(),
+            difficulty: Difficulty::Edit,
+            difficulty_num: f64::NAN,
+            radar: default(),
+            notes: vec![],
+        };
+        let mut notes = conv.out_notes.clone();
+        let mut check_dist = |key: i32, kind: char, time: f64| -> Result<f64> {
+            let (note, dist) = notes
+                .iter_mut()
+                .filter_map(|note| {
+                    if note.key == key && note.kind == kind {
+                        let sm_time = sm.beat_to_time().beat_to_time(note.beat) * 1000.;
+                        let dist = (time - sm_time).abs();
+                        Some((note, dist))
+                    } else {
+                        None
+                    }
+                })
+                .min_by_key(|(_n, dist)| SortableFloat(*dist))
+                .ok_or_else(|| anyhow!("more osu notes than sm notes"))?;
+            note.key = -1;
+            Ok(dist)
+        };
+        let mut max_dist = 0f64;
+        for obj in bm.hit_objects.iter() {
+            //Get key
+            let obj_key = (obj.x * key_count / 512.).floor();
+            ensure!(
+                obj_key.is_finite() && obj_key as i32 >= 0 && (obj_key as i32) < key_count as i32,
+                "invalid object x {} corresponding to key {}",
+                obj.x,
+                obj_key
+            );
+            let obj_key = obj_key as i32;
+            //Check note start
+            max_dist = max_dist.max(check_dist(
+                obj_key,
+                if obj.ty & osufile::TYPE_LONG == 0 {
+                    Note::KIND_HIT
+                } else {
+                    Note::KIND_HEAD
+                },
+                obj.time,
+            )?);
+            //Also check longnote ends
+            if obj.ty & osufile::TYPE_LONG != 0 {
+                //Long note
+                //Get the end time in millis
+                let end_time = obj
+                    .extras
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .parse::<f64>()
+                    .map_err(|_| {
+                        anyhow!(
+                            "invalid hold note extras \"{}\", expected endTime",
+                            obj.extras
+                        )
+                    })?;
+                //Check note end
+                max_dist = max_dist.max(check_dist(obj_key, Note::KIND_TAIL, end_time)?);
+            }
+        }
+        ensure!(
+            notes.iter().all(|note| note.key == -1),
+            "more sm notes than osu notes (leftovers: {:?})",
+            notes
+                .iter()
+                .filter(|note| note.key != -1)
+                .collect::<Vec<_>>()
+        );
+        trace!("      max error in milliseconds: {}", max_dist);
     }
     Ok(key_count as i32)
 }
@@ -717,11 +942,13 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
                         .map_err(|_| {
                             anyhow!("invalid spinner extras \"{}\", expected length", obj.extras)
                         })?;
-                //The length of _the entire_ slider, factoring in multiple slides
-                let beat_len = BeatPos::from(
-                    slides as f64 * length_pixels / (100. * bm.slider_multiplier)
-                        * conv.inherited_multiplier,
-                );
+                //The length of _the entire_ slider in milliseconds, factoring in multiple slides
+                //Note that only the beat length of the starting timing point is considered, to be
+                //consistent with how osu! works does it.
+                let slider_len = slides as f64 * length_pixels / (100. * bm.slider_multiplier)
+                    * (conv.cur_tp.beat_len * conv.inherited_multiplier);
+                //Convert the length to beats
+                let beat_len = conv.get_beat(obj.time + slider_len) - beat;
                 if beat_len.as_num() / (slides as f64) < conf.standard.min_slider_bounce {
                     slides = (beat_len.as_num() / conf.standard.min_slider_bounce).round() as usize;
                 }

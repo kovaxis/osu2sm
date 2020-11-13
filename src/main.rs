@@ -5,7 +5,7 @@ mod prelude {
         linear_map,
         node::{ConcreteNode, Node, SimfileStore},
         osufile::{self, Beatmap, TimingPoint},
-        simfile::{BeatPos, ControlPoint, Difficulty, Gamemode, Note, Simfile, ToTime},
+        simfile::{BeatPos, ControlPoint, Difficulty, DisplayBpm, Gamemode, Note, Simfile, ToTime},
         simfile_rng, symlink_dir, symlink_file, BaseDirFinder,
     };
     pub use anyhow::{anyhow, bail, ensure, Context, Error, Result};
