@@ -197,15 +197,10 @@ fn get_note_density(conf: &NoteDensity, sm: &Simfile) -> f64 {
     }
     let mut last_id: u32 = 0;
     let mut weight_changes = Vec::with_capacity(2 * sm.notes.len() * conf.halos.len());
-    for (beat, start_idx, end_idx) in sm.iter_beats() {
-        let time = to_time.beat_to_time(beat);
+    for beat in sm.iter_beats() {
+        let time = to_time.beat_to_time(beat.pos);
         //Calculate a weight for the notes on this beat
-        let mut note_count = 0;
-        for i in start_idx..end_idx {
-            if !sm.notes[i].is_tail() {
-                note_count += 1;
-            }
-        }
+        let note_count = beat.count_heads(&sm.notes);
         if note_count > 0 {
             let weight = key_weights.get(note_count - 1).copied().unwrap_or_else(|| {
                 default_base_weight + default_key_weight * (note_count - key_weights.len()) as f32
@@ -265,11 +260,11 @@ fn get_note_gap(conf: &NoteGap, sm: &Simfile) -> f64 {
     let mut to_time = sm.beat_to_time();
     let mut total_freq = 0.;
     let mut total_gaps = 0;
-    for (beat, start, end) in sm.iter_beats() {
-        if sm.notes[start..end].iter().all(|note| note.is_tail()) {
+    for beat in sm.iter_beats() {
+        if beat.count_heads(&sm.notes) == 0 {
             continue;
         }
-        let time = to_time.beat_to_time(beat);
+        let time = to_time.beat_to_time(beat.pos);
         if let Some(last_time) = last_time {
             let gap = (time - last_time) as f32;
             if gap > 0. {

@@ -1,10 +1,10 @@
 
 # Planned changes
 
-- Add modes to `Remap`, specifically a mode that takes input notes just as an intensity reference
-    (for better `osu!std` mapping).
+- In order to make osu!standard-converted maps, make `Remap` have several alternative map-wide
+    pattern sets, where only one is selected using some criteria.
 
-# Possible changes
+# Wishlist, kinda
 
 - Use difficulties from `osu!.db`.
 - Use `.ssc` instead of `.sm`.

@@ -202,6 +202,10 @@ impl Node for SimfileWrite {
                     }
                     Err(err) => {
                         warn!("  disabled in-place conversion: {:#}", err);
+                        #[cfg(target_family = "windows")]
+                        {
+                            warn!("    maybe run as administrator?");
+                        }
                         PathBuf::new()
                     }
                 }

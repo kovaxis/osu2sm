@@ -7,17 +7,12 @@ pub struct Remap {
     pub into: BucketId,
     /// Into what gamemode to convert.
     pub gamemode: Gamemode,
-    /// If the input keycount is the same as the output keycount, avoid key changes.
-    pub avoid_shuffle: bool,
-    /// Weighting options to prevent too many jacks (quick notes on the same key).
-    ///
-    /// Each element consists of a `(time, weight)` pair, where `time` is the time elapsed since
-    /// this key was last active, and `weight` is the random choice weight to assign to this key.
-    /// Intermediate values are interpolated.
-    ///
-    /// This way, keys that have not had notes in a while have a higher chance of getting a key,
-    /// while keys that just had a key will not get spammed at random.
+    /// The default unit to advance when no patterns match.
+    pub default_unit: f64,
+    /// Similar to `Rekey::weight_curve`.
     pub weight_curve: Vec<(f32, f32)>,
+    /// The different prioritized patterns to attempt to apply.
+    pub patterns: Vec<Pattern>,
 }
 impl Default for Remap {
     fn default() -> Self {
@@ -25,8 +20,9 @@ impl Default for Remap {
             from: default(),
             into: default(),
             gamemode: Gamemode::PumpSingle,
-            avoid_shuffle: true,
+            default_unit: 1.,
             weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
+            patterns: vec![],
         }
     }
 }
@@ -35,7 +31,9 @@ impl Node for Remap {
     fn apply(&self, store: &mut SimfileStore) -> Result<()> {
         store.get(&self.from, |store, list| {
             for sm in list.iter_mut() {
-                convert(sm, self)?;
+                let notes = remap(sm, self)?;
+                sm.notes = notes;
+                sm.gamemode = self.gamemode;
             }
             store.put(&self.into, mem::replace(list, default()));
             Ok(())
@@ -49,137 +47,153 @@ impl Node for Remap {
     }
 }
 
-pub struct KeyAlloc {
-    weight_points: Vec<(f32, f32, f32)>,
-    default_weight: f32,
-    last_active: Vec<f64>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pattern {
+    dist: f64,
+    keys: f64,
+    unit: f64,
+    notes: Vec<(f64, i32)>,
 }
-impl KeyAlloc {
-    pub fn new(weight_curve: &[(f32, f32)], key_count: usize) -> KeyAlloc {
-        let mut points = Vec::with_capacity(weight_curve.len().saturating_sub(1));
-        for i in 0..weight_curve.len().saturating_sub(1) {
-            let (this_x, this_y) = weight_curve[i];
-            let (next_x, next_y) = weight_curve[i + 1];
-            let m = (next_y - this_y) / (next_x - this_x);
-            points.push((next_x, m, -this_x * m + this_y));
-        }
-        let default_weight = weight_curve.last().map(|(_x, y)| *y).unwrap_or(1.);
-        KeyAlloc {
-            weight_points: points,
-            default_weight,
-            last_active: vec![f64::NEG_INFINITY; key_count],
-        }
-    }
-
-    /// Map the amount of time since the key was last active to a choose weight.
-    /// Try to map higher times to more weight, but not too much
-    pub fn inactive_time_to_weight(&self, time: f32) -> f32 {
-        for &(up_to, m, c) in self.weight_points.iter() {
-            if time <= up_to {
-                return m * time + c;
-            }
-        }
-        self.default_weight
-    }
-
-    pub fn touch(&mut self, key: usize, time: f64) {
-        self.last_active[key] = time;
-    }
-
-    pub fn alloc(&mut self, keys: &[usize], time: f64, rng: &mut FastRng) -> Option<usize> {
-        match keys.choose_weighted(rng, |&out_key| {
-            let time = (time - self.last_active[out_key]) as f32;
-            let weight = self.inactive_time_to_weight(time);
-            weight
-        }) {
-            Ok(&key) => {
-                self.touch(key, time);
-                Some(key)
-            }
-            Err(_) => None,
+impl Default for Pattern {
+    fn default() -> Self {
+        Self {
+            dist: 1.,
+            keys: 1.,
+            unit: 0.,
+            notes: vec![(1., 0)],
         }
     }
 }
 
-fn convert(sm: &mut Simfile, conf: &Remap) -> Result<()> {
-    //Keycounts
-    let in_keycount = sm.gamemode.key_count() as usize;
+/// Create entirely new notes, basing the amount of notes per mapping unit on the previous amount
+/// of notes on that mapping unit.
+fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
+    use crate::node::rekey::KeyAlloc;
+
     let out_keycount = conf.gamemode.key_count() as usize;
-    trace!("    converting {}K to {}K", in_keycount, out_keycount);
-    ensure!(in_keycount > 0, "cannot convert 0-key map");
-    ensure!(out_keycount > 0, "cannot convert to 0-key map");
+    let mut out_notes = Vec::new();
 
-    //The strategy used to choose keys
+    let mut beats = sm.iter_beats();
+    let mut last_beat = BeatPos::from(0.);
+    let mut rng = simfile_rng(sm, "remap");
     let mut key_alloc = KeyAlloc::new(&conf.weight_curve, out_keycount);
-
-    //Do nothing if there is nothing to do
-    if conf.avoid_shuffle && in_keycount == out_keycount {
-        sm.gamemode = conf.gamemode;
-        return Ok(());
-    }
-
-    //Detach note buffer for lifetiming purposes
-    let mut notes = mem::replace(&mut sm.notes, Vec::new());
-    //To randomize key mappings
-    let mut rng = simfile_rng(sm, "convert");
-    //Beat -> time
-    let mut to_time = ToTime::new(sm);
-
-    //Holds which outkeys are locked.
-    //If the inner option is `Some`, that outkey should be unlocked after that beat passes.
-    let mut locked_outkeys = vec![None; out_keycount];
-    //If a tail occurs at the given inkey, unlock the stored outkey.
-    let mut unlock_by_tails = vec![0; in_keycount];
-    //Auxiliary buffer to choose weighted outkeys
-    let mut choose_tmp_buf = Vec::with_capacity(out_keycount);
-
-    for note in notes.iter_mut() {
-        let note_time = to_time.beat_to_time(note.beat);
-        //Unlock any auto-unlocking keys
-        for locked in locked_outkeys.iter_mut() {
-            if let Some(Some(unlock_after)) = *locked {
-                if note.beat > unlock_after {
-                    *locked = None;
+    let mut tmp_choose_buf = Vec::with_capacity(out_keycount);
+    let mut chosen_buf = Vec::with_capacity(out_keycount);
+    let mut to_time = sm.beat_to_time();
+    trace!("remapping...");
+    while !beats.is_empty() {
+        let mut pattern = None;
+        for pat in conf.patterns.iter() {
+            let unit = if pat.unit > 0. {
+                pat.unit
+            } else {
+                conf.default_unit
+            };
+            let next_beat = last_beat + BeatPos::from(unit);
+            let mut tmp_beats = beats.clone();
+            let mut simultaneous_sum = 0;
+            let mut beat_count = 0;
+            for beat in &mut tmp_beats {
+                if beat.pos >= next_beat {
+                    break;
+                }
+                let heads = beat.count_heads(&sm.notes);
+                if heads > 0 {
+                    simultaneous_sum += heads;
+                    beat_count += 1;
+                }
+            }
+            if beat_count > 0 {
+                let dist_avg = unit / (beat_count + 1) as f64;
+                let simultaneous_avg = simultaneous_sum as f64 / beat_count as f64;
+                if dist_avg <= pat.dist && simultaneous_avg >= pat.keys {
+                    //Use this pattern
+                    trace!("  matched pattern {:?} on beat {}", pat, last_beat);
+                    pattern = Some((pat, unit));
+                    beats = tmp_beats;
+                    break;
                 }
             }
         }
-        //Map key
-        let mapped_key = if note.is_tail() {
-            let out_key = unlock_by_tails[note.key as usize];
-            locked_outkeys[out_key] = None;
-            key_alloc.touch(out_key, note_time);
-            out_key as i32
-        } else {
-            //Choose an outkey using randomness and weights
-            choose_tmp_buf.clear();
-            choose_tmp_buf.extend(
-                locked_outkeys
-                    .iter()
-                    .enumerate()
-                    .filter(|(_i, locked)| locked.is_none())
-                    .map(|(i, _locked)| i),
-            );
-            match key_alloc.alloc(&choose_tmp_buf, note_time, &mut rng) {
-                Some(out_key) => {
-                    if note.is_head() {
-                        locked_outkeys[out_key] = Some(None);
-                        unlock_by_tails[note.key as usize] = out_key;
-                    } else {
-                        locked_outkeys[out_key] = Some(Some(note.beat));
+        match pattern {
+            Some((pat, unit)) => {
+                //Generate this pattern
+                chosen_buf.clear();
+                let mut last_rel_beat = 0.;
+                tmp_choose_buf.clear();
+                tmp_choose_buf.extend(0..out_keycount);
+                for &(rel_beat, key_placeholder) in pat.notes.iter() {
+                    //Sanitize pattern
+                    ensure!(key_placeholder >= 0, "pattern key cannot be negative");
+                    ensure!(
+                        rel_beat >= last_rel_beat,
+                        "pattern beats must increase monotonically"
+                    );
+                    if rel_beat > last_rel_beat {
+                        tmp_choose_buf.clear();
+                        tmp_choose_buf.extend(0..out_keycount);
                     }
-                    out_key as i32
+                    last_rel_beat = rel_beat;
+                    ensure!(
+                        rel_beat <= unit,
+                        "pattern beats cannot go beyond the pattern unit"
+                    );
+                    let key_placeholder = key_placeholder as usize;
+
+                    //Get the absolute beat and time
+                    let beat = last_beat + BeatPos::from(rel_beat);
+                    let time = to_time.beat_to_time(beat);
+
+                    //Get the key
+                    let key = if key_placeholder < chosen_buf.len() {
+                        //Reuse an allocated key
+                        chosen_buf[key_placeholder]
+                    } else if key_placeholder == chosen_buf.len() {
+                        //Allocate a new key
+                        let (pos, out_key) = key_alloc.alloc_idx(&tmp_choose_buf, time, &mut rng).ok_or_else(|| anyhow!("pattern key placeholder {} allocated too many keys on the same beat for keycount ({})", key_placeholder, out_keycount))?;
+                        tmp_choose_buf.swap_remove(pos);
+                        chosen_buf.push(out_key);
+                        trace!(
+                            "    allocated key {} for placeholder {}",
+                            out_key,
+                            key_placeholder
+                        );
+                        out_key
+                    } else {
+                        bail!(
+                            "pattern key placeholder {} skips indices (next key placeholder would be {})",
+                            key_placeholder,
+                            chosen_buf.len()
+                        )
+                    };
+
+                    //Add a note on this beat and key
+                    trace!("    placing note at beat {}, key {}", beat, key);
+                    key_alloc.touch(key, time);
+                    out_notes.push(Note {
+                        beat,
+                        key: key as i32,
+                        kind: Note::KIND_HIT,
+                    });
                 }
-                None => {
-                    //All output keys are locked
-                    -1
-                }
+                last_beat += BeatPos::from(unit);
             }
-        };
-        note.key = mapped_key;
+            None => {
+                //No patterns found, maybe this is an empty part of the song
+                //Advance by `default_unit` beats
+                let default_unit = BeatPos::from(conf.default_unit);
+                last_beat = last_beat.floor(default_unit) + default_unit;
+                while let Some(beat) = beats.peek() {
+                    if beat.pos >= last_beat {
+                        break;
+                    } else {
+                        beats.next();
+                    }
+                }
+                trace!("  no pattern matched, advanced to beat {}", last_beat);
+            }
+        }
     }
-    notes.retain(|note| note.key >= 0);
-    //Finally, modify simfile
-    sm.notes = notes;
-    sm.gamemode = conf.gamemode;
-    Ok(())
+    Ok(out_notes)
 }

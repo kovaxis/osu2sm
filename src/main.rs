@@ -88,7 +88,7 @@ impl Default for Opts {
     fn default() -> Opts {
         Opts {
             nodes: vec![
-                node::OsuLoad {
+                node::osuload::OsuLoad {
                     input: "".to_string(),
                     offset: 0.,
                     standard: node::osuload::OsuStd {
@@ -99,14 +99,15 @@ impl Default for Opts {
                     ..default()
                 }
                 .into(),
-                node::Remap {
+                node::rekey::Rekey {
                     gamemode: Gamemode::DanceSingle,
+                    avoid_shuffle: true,
                     ..default()
                 }
                 .into(),
-                node::Rate { ..default() }.into(),
-                node::Select { ..default() }.into(),
-                node::SimfileWrite {
+                node::rate::Rate { ..default() }.into(),
+                node::select::Select { ..default() }.into(),
+                node::simfilewrite::SimfileWrite {
                     output: "".to_string(),
                     ..default()
                 }

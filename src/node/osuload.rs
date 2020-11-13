@@ -106,7 +106,7 @@ pub struct OsuStd {
     /// How many keys to convert standard beatmaps into.
     /// `0` by default, which disables the standard gamemode parser.
     pub keycount: i32,
-    /// Similar to `Remap::weight_curve`.
+    /// Similar to `Rekey::weight_curve`.
     pub weight_curve: Vec<(f32, f32)>,
     /// A list of distances, where the first distance corresponds to 1 key, the second to 2 keys,
     /// etc...
@@ -871,7 +871,7 @@ fn process_mania(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32
 }
 
 fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
-    use crate::node::remap::KeyAlloc;
+    use crate::node::rekey::KeyAlloc;
 
     let key_count = conf.standard.keycount;
     if key_count == 0 {
@@ -920,11 +920,10 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
                 tmp_choose_vec.clear();
                 tmp_choose_vec.extend(0..key_count);
                 for _ in 0..keys {
-                    if let Some(out_key) =
-                        key_alloc.alloc(&tmp_choose_vec, obj.time / 1000., &mut rng)
+                    if let Some((pos, out_key)) =
+                        key_alloc.alloc_idx(&tmp_choose_vec, obj.time / 1000., &mut rng)
                     {
-                        let pos = tmp_choose_vec.iter().position(|&k| k == out_key).unwrap();
-                        tmp_choose_vec.remove(pos);
+                        tmp_choose_vec.swap_remove(pos);
                         conv.push_note(beat, out_key as i32, Note::KIND_HIT);
                     } else {
                         break;
@@ -973,15 +972,11 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
                     tmp_choose_vec.extend(0..key_count);
                     let mut available_keys = key_count;
                     for _ in 0..keys {
-                        if let Some(out_key) = key_alloc.alloc(
+                        if let Some((pos, out_key)) = key_alloc.alloc_idx(
                             &tmp_choose_vec[..available_keys],
                             obj.time / 1000.,
                             &mut rng,
                         ) {
-                            let pos = tmp_choose_vec[..available_keys]
-                                .iter()
-                                .position(|&k| k == out_key)
-                                .unwrap();
                             tmp_choose_vec[pos..].rotate_left(1);
                             available_keys -= 1;
                             //Push head note

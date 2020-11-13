@@ -2,32 +2,12 @@
 
 use crate::node::prelude::*;
 
-pub use crate::node::{
-    align::Align,
-    filter::{Filter, FilterOp, Property},
-    osuload::OsuLoad,
-    pipe::Pipe,
-    rate::{Rate, RateMethod},
-    remap::Remap,
-    select::Select,
-    simfilewrite::SimfileWrite,
-    simultaneous::Simultaneous,
-    space::Space,
-};
-
 mod prelude {
     pub use crate::{
         node::{
-            align::Align,
-            filter::{Filter, FilterOp, Property},
-            osuload::OsuLoad,
-            pipe::Pipe,
-            remap::Remap,
-            select::Select,
-            simfilewrite::SimfileWrite,
-            simultaneous::Simultaneous,
-            space::Space,
-            BucketId, BucketIter, BucketKind,
+            align::Align, filter::Filter, osuload::OsuLoad, pipe::Pipe, rate::Rate, rekey::Rekey,
+            remap::Remap, select::Select, simfilewrite::SimfileWrite, simultaneous::Simultaneous,
+            space::Space, BucketId, BucketIter, BucketKind,
         },
         prelude::*,
     };
@@ -38,6 +18,7 @@ pub mod filter;
 pub mod osuload;
 pub mod pipe;
 pub mod rate;
+pub mod rekey;
 pub mod remap;
 pub mod select;
 pub mod simfilewrite;
@@ -466,6 +447,7 @@ make_concrete!(
     Pipe,
     Filter,
     Remap,
+    Rekey,
     Simultaneous,
     Align,
     Select,

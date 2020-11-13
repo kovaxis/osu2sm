@@ -147,20 +147,8 @@ impl Simfile {
     }
 
     /// Iterate over the populated beats in a simfile.
-    pub fn iter_beats<'a>(&'a self) -> impl Iterator<Item = (BeatPos, usize, usize)> + 'a {
-        let mut next_idx = 0;
-        iter::from_fn(move || {
-            if next_idx >= self.notes.len() {
-                return None;
-            }
-            let beat_start = next_idx;
-            let cur_beat = self.notes[beat_start].beat;
-            while next_idx < self.notes.len() && self.notes[next_idx].beat == cur_beat {
-                next_idx += 1;
-            }
-            let beat_end = next_idx;
-            Some((cur_beat, beat_start, beat_end))
-        })
+    pub fn iter_beats(&self) -> BeatIter {
+        BeatIter::new(&self.notes)
     }
 
     /// Get a helper type useful for getting monotonically increasing times from beats.
@@ -471,6 +459,59 @@ fn write_notedata(file: &mut impl Write, sm: &Simfile) -> Result<()> {
         &sm.notes[cur_measure.first_note..sm.notes.len()],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct BeatIter<'a> {
+    notes: &'a [Note],
+    next_idx: usize,
+}
+impl BeatIter<'_> {
+    pub fn new(notes: &[Note]) -> BeatIter {
+        BeatIter { notes, next_idx: 0 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.next_idx >= self.notes.len()
+    }
+
+    pub fn peek(&self) -> Option<Beat> {
+        self.clone().next()
+    }
+}
+impl Iterator for BeatIter<'_> {
+    type Item = Beat;
+    fn next(&mut self) -> Option<Beat> {
+        if self.is_empty() {
+            return None;
+        }
+        let beat_start = self.next_idx;
+        let cur_beat = self.notes[beat_start].beat;
+        while self.next_idx < self.notes.len() && self.notes[self.next_idx].beat == cur_beat {
+            self.next_idx += 1;
+        }
+        let beat_end = self.next_idx;
+        Some(Beat {
+            pos: cur_beat,
+            start_idx: beat_start,
+            end_idx: beat_end,
+        })
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct Beat {
+    pub pos: BeatPos,
+    pub start_idx: usize,
+    pub end_idx: usize,
+}
+impl Beat {
+    pub fn count_heads(&self, notes: &[Note]) -> usize {
+        notes[self.start_idx..self.end_idx]
+            .iter()
+            .filter(|note| !note.is_tail())
+            .count()
+    }
 }
 
 /// From the StepMania source,
@@ -857,6 +898,14 @@ impl ToTime<'_> {
             bpms: &sm.bpms,
             cur_idx: 0,
             cur_time: -sm.offset,
+        }
+    }
+
+    pub fn from_raw(bpms: &[ControlPoint], offset: f64) -> ToTime {
+        ToTime {
+            bpms,
+            cur_idx: 0,
+            cur_time: -offset,
         }
     }
 
