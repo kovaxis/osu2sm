@@ -50,6 +50,11 @@ struct Bucket {
     lists: Vec<usize>,
 }
 impl Bucket {
+    fn take_all(&mut self) -> Vec<Box<Simfile>> {
+        self.lists.clear();
+        mem::replace(&mut self.simfiles, default())
+    }
+
     fn take_lists<'a>(
         &'a mut self,
         tmp_vec: &mut Vec<Box<Simfile>>,
@@ -163,12 +168,35 @@ impl SimfileStore {
     where
         F: FnMut(&mut SimfileStore, Box<Simfile>) -> Result<()>,
     {
-        self.get(bucket, |store, list| {
-            for sm in list.drain(..) {
-                visit(store, sm)?;
+        let (name, take) = bucket.unwrap_resolved();
+        if name.is_empty() {
+            //Null bucket
+            trace!("    get flat null bucket");
+            return Ok(());
+        }
+        let all = if take {
+            self.by_name.remove(name).map(|mut b| {
+                trace!("    take flat bucket \"{}\" ({:?})", name, b);
+                b.take_all()
+            })
+        } else {
+            let tmp_vec_ref = &mut self.tmp_vec;
+            self.by_name.get(name).map(|b| {
+                trace!("    get flat bucket \"{}\" ({:?})", name, b);
+                let mut tmp_vec = mem::replace(tmp_vec_ref, default());
+                tmp_vec.extend(b.simfiles.iter().cloned());
+                tmp_vec
+            })
+        };
+        if let Some(mut all) = all {
+            for sm in all.drain(..) {
+                visit(self, sm)?;
             }
-            Ok(())
-        })
+            if all.capacity() > self.tmp_vec.capacity() {
+                self.tmp_vec = all;
+            }
+        }
+        Ok(())
     }
 
     pub fn put<I>(&mut self, bucket: &BucketId, simfiles: I)

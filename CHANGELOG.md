@@ -1,8 +1,6 @@
 
 # Planned changes
 
-- Optimize `get_each` and add a `take_each`, to take advantage of the fact that simfiles are
-    already stored linearly by default.
 - Add modes to `Remap`, specifically a mode that takes input notes just as an intensity reference
     (for better `osu!std` mapping).
 - Change `in_place_from` to `in_place` and make a boolean instead of an `Option`.
