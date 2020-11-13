@@ -91,6 +91,11 @@ impl Default for Opts {
                 node::OsuLoad {
                     input: "".to_string(),
                     offset: 0.,
+                    standard: node::osuload::OsuStd {
+                        //Disable the standard parser by default
+                        keycount: 0,
+                        ..default()
+                    },
                     ..default()
                 }
                 .into(),

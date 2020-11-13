@@ -78,7 +78,7 @@ pub struct NoteCount {
     ///
     /// More specifically, if `log` is greater than zero, take the logarithm base `log` of the
     /// amount of non-tail notes.
-    log: f64,
+    pub log: f64,
 }
 impl Default for NoteCount {
     fn default() -> Self {
@@ -90,14 +90,14 @@ impl Default for NoteCount {
 #[serde(default)]
 pub struct NoteDensity {
     /// A list of `(duration, weight)` pairs.
-    halos: Vec<(f64, f64)>,
+    pub halos: Vec<(f64, f64)>,
     /// A list of weights for each additional simultaneous note.
     ///
     /// If more than the length of this `Vec` simultaneous notes occur, the last weight (or `1` if
     /// there are no weights) will be used.
-    simultaneous: Vec<f64>,
+    pub simultaneous: Vec<f64>,
     /// How much weight to give to short high densities over long low densities.
-    exponent: f64,
+    pub exponent: f64,
 }
 impl Default for NoteDensity {
     fn default() -> Self {
@@ -113,7 +113,7 @@ impl Default for NoteDensity {
 #[serde(default)]
 pub struct NoteGap {
     /// How much weight to give to few very short gaps over many not-so-short gaps.
-    exponent: f64,
+    pub exponent: f64,
 }
 impl Default for NoteGap {
     fn default() -> Self {
@@ -272,9 +272,11 @@ fn get_note_gap(conf: &NoteGap, sm: &Simfile) -> f64 {
         let time = to_time.beat_to_time(beat);
         if let Some(last_time) = last_time {
             let gap = (time - last_time) as f32;
-            let freq = 1. / gap;
-            total_freq += freq.powf(exp);
-            total_gaps += 1;
+            if gap > 0. {
+                let freq = 1. / gap;
+                total_freq += freq.powf(exp);
+                total_gaps += 1;
+            }
         }
         last_time = Some(time);
     }

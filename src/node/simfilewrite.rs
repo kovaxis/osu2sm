@@ -15,7 +15,8 @@ pub struct SimfileWrite {
     pub copy: Vec<CopyMethod>,
     /// Attempt to create a directory symlink to this input directory, speeding up the process.
     pub in_place_from: Option<String>,
-    /// Remove any leftover `.sm` files.
+    /// Remove all files in the output directory or subdirectories matching the `osu2sm-*.sm`
+    /// filename, where `*` stands for anything.
     pub cleanup: bool,
 }
 
@@ -26,8 +27,8 @@ impl Default for SimfileWrite {
             output: "".into(),
             fix_output: true,
             in_place_from: None,
-            cleanup: false,
             copy: vec![CopyMethod::Hardlink, CopyMethod::Symlink, CopyMethod::Copy],
+            cleanup: false,
         }
     }
 }
@@ -106,8 +107,40 @@ impl Node for SimfileWrite {
                 }
             }
         }
+        //Cleanup output
         if self.cleanup {
-            info!("cleanup mode enabled, removing stray `.sm` files");
+            info!(
+                "cleanup enabled, removing all `osu2sm-*.sm` files under \"{}\"",
+                self.output
+            );
+            let mut files_removed = 0;
+            for file in WalkDir::new(&self.output) {
+                let file = match file {
+                    Ok(f) => f,
+                    Err(err) => {
+                        warn!("  failed to list files for cleanup: {:#}", err);
+                        continue;
+                    }
+                };
+                if file.file_type().is_file() {
+                    let filename = file.file_name().to_string_lossy();
+                    if filename.starts_with("osu2sm-") && filename.ends_with(".sm") {
+                        match fs::remove_file(file.path()) {
+                            Ok(()) => {
+                                files_removed += 1;
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "  failed to remove file \"{}\" while cleaning up: {:#}",
+                                    file.path().display(),
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            info!("  removed {} files", files_removed);
         }
         info!("outputting simfiles in \"{}\"", self.output);
         Ok(())
@@ -171,28 +204,6 @@ fn write_sm(
             .context("find path relative to base")?;
         Path::new(&conf.output).join(rel)
     };
-    //Cleanup output
-    if conf.cleanup {
-        for file in WalkDir::new(&out_base).min_depth(1).max_depth(1) {
-            let file = match file {
-                Ok(f) => f,
-                Err(err) => {
-                    warn!("  failed to list beatmapset files for cleanup: {:#}", err);
-                    break;
-                }
-            };
-            let filename: &Path = file.file_name().as_ref();
-            if filename.extension() == Some("sm".as_ref()) {
-                if let Err(err) = fs::remove_file(file.path()) {
-                    warn!(
-                        "  failed to remove file \"{}\" while cleaning up: {:#}",
-                        file.path().display(),
-                        err
-                    );
-                }
-            }
-        }
-    }
     //Create base output folder
     if conf.in_place_from.is_none() {
         fs::create_dir_all(&out_base)

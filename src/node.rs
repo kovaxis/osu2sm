@@ -33,16 +33,16 @@ mod prelude {
     };
 }
 
-mod align;
-mod filter;
-mod osuload;
-mod pipe;
-mod rate;
-mod remap;
-mod select;
-mod simfilewrite;
-mod simultaneous;
-mod space;
+pub mod align;
+pub mod filter;
+pub mod osuload;
+pub mod pipe;
+pub mod rate;
+pub mod remap;
+pub mod select;
+pub mod simfilewrite;
+pub mod simultaneous;
+pub mod space;
 
 #[derive(Clone, Default)]
 struct Bucket {

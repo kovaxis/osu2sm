@@ -85,9 +85,9 @@ impl Default for OsuLoad {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsuMania {
-    into: BucketId,
+    pub into: BucketId,
     /// Whether to check the error in milliseconds introduced by the conversion/quantization.
-    check_error: bool,
+    pub check_error: bool,
 }
 
 impl Default for OsuMania {
@@ -102,14 +102,20 @@ impl Default for OsuMania {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsuStd {
-    into: BucketId,
-    keycount: i32,
-    weight_curve: Vec<(f32, f32)>,
-    dist_to_keycount: Vec<f64>,
+    pub into: BucketId,
+    /// How many keys to convert standard beatmaps into.
+    /// `0` by default, which disables the standard gamemode parser.
+    pub keycount: i32,
+    /// Similar to `Remap::weight_curve`.
+    pub weight_curve: Vec<(f32, f32)>,
+    /// A list of distances, where the first distance corresponds to 1 key, the second to 2 keys,
+    /// etc...
+    /// If a jump is over the specified distance, it maps to a chord with that amount of keys.
+    pub dist_to_keycount: Vec<f64>,
     /// How many notes to generate per spinner spin.
-    steps_per_spin: f64,
+    pub steps_per_spin: f64,
     /// The minimum length of a slider bounce (in beats).
-    min_slider_bounce: f64,
+    pub min_slider_bounce: f64,
 }
 
 impl Default for OsuStd {
@@ -390,7 +396,7 @@ impl ConvCtx<'_> {
                 if tp.beat_len > 0. {
                     first_noninherited.get_or_insert(idx);
                     if tp.time <= first_hit_time {
-                        last_before_start.get_or_insert(idx);
+                        last_before_start = Some(idx);
                     }
                 }
             }
@@ -482,7 +488,7 @@ impl ConvCtx<'_> {
                 } else {
                     //Advance to this timing point
                     let raw_beat_adv = (next_tp.time - self.cur_time) / self.cur_tp.beat_len;
-                    let beat_adv = BeatPos::from(raw_beat_adv).ceil(self.rounding);
+                    let beat_adv = BeatPos::from_num_ceil(raw_beat_adv).ceil(self.rounding);
                     let tp_beat = self.cur_beat + beat_adv;
                     let mut tp_time = self.cur_time + beat_adv.as_num() * self.cur_tp.beat_len;
                     if (tp_time - next_tp.time).abs() >= 4. {
@@ -677,15 +683,18 @@ fn process_beatmap(
         unknown => bail!("mode not supported: unknown osu! gamemode {}", unknown),
     };
     //Finish up
-    conv.finish(
-        conf,
-        bmset_cache,
-        bmset_path,
-        bm_path,
-        &bm,
-        key_count,
-        |sm| out(bm.mode as usize, sm),
-    )
+    if key_count != 0 {
+        conv.finish(
+            conf,
+            bmset_cache,
+            bmset_path,
+            bm_path,
+            &bm,
+            key_count,
+            |sm| out(bm.mode as usize, sm),
+        )?;
+    }
+    Ok(())
 }
 
 fn process_mania(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32> {
@@ -865,7 +874,11 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
     use crate::node::remap::KeyAlloc;
 
     let key_count = conf.standard.keycount;
-    ensure!(key_count > 0, "keycount must be greater than 0");
+    if key_count == 0 {
+        //Disable the standard parser
+        return Ok(0);
+    }
+    ensure!(key_count > 0, "keycount must be positive");
     let key_count = key_count as usize;
     let mut key_alloc = KeyAlloc::new(&conf.standard.weight_curve, key_count);
     let mut rng = FastRng::seed_from_u64(fxhash::hash64(&(
