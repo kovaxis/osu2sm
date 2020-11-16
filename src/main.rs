@@ -374,7 +374,7 @@ fn run() -> Result<()> {
             Err(err) => {
                 let opts = Opts::default();
                 opts.apply();
-                warn!("failed to load config from default path: {:#}", err);
+                info!("failed to load config from default path: {:#}", err);
                 if cfg_path.exists() {
                     info!("using default config");
                 } else {
