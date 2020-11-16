@@ -7,22 +7,16 @@ pub struct Remap {
     pub into: BucketId,
     /// Into what gamemode to convert.
     pub gamemode: Gamemode,
-    /// The default unit to advance when no patterns match.
-    pub default_unit: f64,
-    /// Similar to `Rekey::weight_curve`.
-    pub weight_curve: Vec<(f32, f32)>,
-    /// The different prioritized patterns to attempt to apply.
-    pub patterns: Vec<Pattern>,
+    /// The different prioritized pattern sets to attempt to apply to the beatmap.
+    pub pattern_sets: Vec<PatternSet>,
 }
 impl Default for Remap {
     fn default() -> Self {
         Self {
             from: default(),
             into: default(),
-            gamemode: Gamemode::PumpSingle,
-            default_unit: 1.,
-            weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
-            patterns: vec![],
+            gamemode: Gamemode::DanceSingle,
+            pattern_sets: vec![],
         }
     }
 }
@@ -49,11 +43,32 @@ impl Node for Remap {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct PatternSet {
+    /// Similar to `Rekey::weight_curve`.
+    pub weight_curve: Vec<(f32, f32)>,
+    pub default_unit: f64,
+    pub difficulty: f64,
+    /// The prioritized patterns to apply to each song unit.
+    pub patterns: Vec<Pattern>,
+}
+impl Default for PatternSet {
+    fn default() -> Self {
+        Self {
+            weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
+            default_unit: 1.,
+            difficulty: 0.,
+            patterns: vec![default()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Pattern {
-    dist: f64,
-    keys: f64,
-    unit: f64,
-    notes: Vec<(f64, i32)>,
+    pub dist: f64,
+    pub keys: f64,
+    pub unit: f64,
+    pub notes: Vec<(f64, i32)>,
 }
 impl Default for Pattern {
     fn default() -> Self {
@@ -70,25 +85,52 @@ impl Default for Pattern {
 /// of notes on that mapping unit.
 fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
     use crate::node::rekey::KeyAlloc;
+    trace!("remapping...");
 
+    //Choose pattern set
+    ensure!(
+        sm.difficulty_num.is_finite() || conf.pattern_sets.len() == 1,
+        "attempt to remap a non-rated simfile with multiple patterns"
+    );
+    let (ps_idx, pattern_set) = conf
+        .pattern_sets
+        .iter()
+        .enumerate()
+        .min_by_key(|(_i, set)| SortableFloat((set.difficulty - sm.difficulty_num).abs()))
+        .ok_or_else(|| anyhow!("no pattern sets specified"))?;
+    trace!(
+        "  chose pattern-set {} for simfile difficulty {}",
+        ps_idx,
+        sm.difficulty_num
+    );
+
+    //Figure out output
     let out_keycount = conf.gamemode.key_count() as usize;
     let mut out_notes = Vec::new();
 
+    //Iterator over the beats in the simfile
     let mut beats = sm.iter_beats();
+    //Keeps track over the start of the current unit
     let mut last_beat = BeatPos::from(0.);
+    //Randomness for key allocation
     let mut rng = simfile_rng(sm, "remap");
-    let mut key_alloc = KeyAlloc::new(&conf.weight_curve, out_keycount);
+    //Random key allocation, with time weighting
+    let mut key_alloc = KeyAlloc::new(out_keycount);
+    key_alloc.set_weight_curve(&pattern_set.weight_curve);
+    //Keep track of available keys for allocation
     let mut tmp_choose_buf = Vec::with_capacity(out_keycount);
+    //Keep track of the key indices for each placeholder index
     let mut chosen_buf = Vec::with_capacity(out_keycount);
+    //Convert beats to times
     let mut to_time = sm.beat_to_time();
-    trace!("remapping...");
+
     while !beats.is_empty() {
         let mut pattern = None;
-        for pat in conf.patterns.iter() {
+        for pat in pattern_set.patterns.iter() {
             let unit = if pat.unit > 0. {
                 pat.unit
             } else {
-                conf.default_unit
+                pattern_set.default_unit
             };
             let next_beat = last_beat + BeatPos::from(unit);
             let mut tmp_beats = beats.clone();
@@ -109,7 +151,6 @@ fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
                 let simultaneous_avg = simultaneous_sum as f64 / beat_count as f64;
                 if dist_avg <= pat.dist && simultaneous_avg >= pat.keys {
                     //Use this pattern
-                    trace!("  matched pattern {:?} on beat {}", pat, last_beat);
                     pattern = Some((pat, unit));
                     beats = tmp_beats;
                     break;
@@ -154,11 +195,6 @@ fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
                         let (pos, out_key) = key_alloc.alloc_idx(&tmp_choose_buf, time, &mut rng).ok_or_else(|| anyhow!("pattern key placeholder {} allocated too many keys on the same beat for keycount ({})", key_placeholder, out_keycount))?;
                         tmp_choose_buf.swap_remove(pos);
                         chosen_buf.push(out_key);
-                        trace!(
-                            "    allocated key {} for placeholder {}",
-                            out_key,
-                            key_placeholder
-                        );
                         out_key
                     } else {
                         bail!(
@@ -169,7 +205,6 @@ fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
                     };
 
                     //Add a note on this beat and key
-                    trace!("    placing note at beat {}, key {}", beat, key);
                     key_alloc.touch(key, time);
                     out_notes.push(Note {
                         beat,
@@ -182,7 +217,7 @@ fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
             None => {
                 //No patterns found, maybe this is an empty part of the song
                 //Advance by `default_unit` beats
-                let default_unit = BeatPos::from(conf.default_unit);
+                let default_unit = BeatPos::from(pattern_set.default_unit);
                 last_beat = last_beat.floor(default_unit) + default_unit;
                 while let Some(beat) = beats.peek() {
                     if beat.pos >= last_beat {
@@ -191,7 +226,6 @@ fn remap(sm: &mut Simfile, conf: &Remap) -> Result<Vec<Note>> {
                         beats.next();
                     }
                 }
-                trace!("  no pattern matched, advanced to beat {}", last_beat);
             }
         }
     }

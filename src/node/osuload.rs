@@ -750,7 +750,8 @@ fn process_mania(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32
                         "invalid hold note extras \"{}\", expected endTime",
                         obj.extras
                     )
-                })?;
+                })?
+                + bm.offset_ms;
             //Leave it for later insertion at the correct time
             let insert_idx = pending_tails
                 .iter()
@@ -852,7 +853,8 @@ fn process_mania(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<i32
                             "invalid hold note extras \"{}\", expected endTime",
                             obj.extras
                         )
-                    })?;
+                    })?
+                    + bm.offset_ms;
                 //Check note end
                 max_dist = max_dist.max(check_dist(obj_key, Note::KIND_TAIL, end_time)?);
             }
@@ -880,7 +882,8 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
     }
     ensure!(key_count > 0, "keycount must be positive");
     let key_count = key_count as usize;
-    let mut key_alloc = KeyAlloc::new(&conf.standard.weight_curve, key_count);
+    let mut key_alloc = KeyAlloc::new(key_count);
+    key_alloc.set_weight_curve(&conf.standard.weight_curve);
     let mut rng = FastRng::seed_from_u64(fxhash::hash64(&(
         &bm.title,
         &bm.artist,
@@ -1040,7 +1043,8 @@ fn process_standard(conf: &OsuLoad, bm: &Beatmap, conv: &mut ConvCtx) -> Result<
                         "invalid spinner extras \"{}\", expected endTime",
                         obj.extras
                     )
-                })?;
+                })?
+                + bm.offset_ms;
             let end_beat = conv.get_beat(end_time);
             //Taken from the osu! wiki
             let spins_per_sec = if bm.overall_difficulty < 5. {

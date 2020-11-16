@@ -205,7 +205,8 @@ pub fn trim_difficulties(conf: &Select, simfiles: &mut Vec<Box<Simfile>>) -> Res
     //Make sure some rating system was used
     ensure!(
         simfiles.iter().all(|sm| sm.difficulty_num.is_finite()),
-        "cannot fix simfiles without a difficulty rating (use the `Rate` node before `SimfileFix`)"
+        "cannot fix simfiles without a difficulty rating (use the `Rate` node before `Select`): difficulties are {:?}",
+        simfiles.iter().map(|sm| sm.difficulty_num).collect::<Vec<_>>()
     );
 
     //Create an auxiliary vec holding chart indices and difficulties

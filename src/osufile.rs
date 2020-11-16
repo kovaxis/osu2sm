@@ -28,6 +28,7 @@ pub struct Beatmap {
     pub video: String,
     pub timing_points: Vec<TimingPoint>,
     pub hit_objects: Vec<HitObject>,
+    pub offset_ms: f64,
 }
 impl Default for Beatmap {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for Beatmap {
             video: default(),
             timing_points: default(),
             hit_objects: default(),
+            offset_ms: 0.,
         }
     }
 }
@@ -111,7 +113,7 @@ impl Beatmap {
         let mut line_num = 0;
 
         //Find osu header
-        let mut global_offset = offset_ms;
+        bm.offset_ms = offset_ms;
         for line in &mut lines {
             let line = line?;
             line_num += 1;
@@ -124,12 +126,11 @@ impl Beatmap {
                 // According to the osu!lazer source:
                 // BeatmapVersion 4 and lower had an incorrect offset (stable has this set as 24ms off)
                 if version < 5 {
-                    global_offset += 24.;
+                    bm.offset_ms += 24.;
                 }
                 break;
             }
         }
-        let global_offset = global_offset;
 
         let mut errors = Vec::new();
         let mut requires_sort = false;
@@ -224,7 +225,7 @@ impl Beatmap {
                         }
                         TimingPoints => {
                             let mut comps = line.split(',');
-                            let time = get_component::<f64, _>(&mut comps, "time")? + global_offset;
+                            let time = get_component::<f64, _>(&mut comps, "time")? + bm.offset_ms;
                             let beat_len = get_component(&mut comps, "beatLength")?;
                             let meter = comps
                                 .next()
@@ -242,7 +243,7 @@ impl Beatmap {
                             let mut comps = line.splitn(6, ',');
                             let x = get_component(&mut comps, "x")?;
                             let y = get_component(&mut comps, "y")?;
-                            let time = get_component::<f64, _>(&mut comps, "time")? + global_offset;
+                            let time = get_component::<f64, _>(&mut comps, "time")? + bm.offset_ms;
                             let ty = get_component(&mut comps, "type")?;
                             let _hitsound: String = get_component(&mut comps, "hitsound")?;
                             let extras = comps.next().unwrap_or_default().trim().to_string();

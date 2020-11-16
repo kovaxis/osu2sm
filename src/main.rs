@@ -90,7 +90,6 @@ impl Default for Opts {
             nodes: vec![
                 node::osuload::OsuLoad {
                     input: "".to_string(),
-                    offset: 0.,
                     standard: node::osuload::OsuStd {
                         //Disable the standard parser by default
                         keycount: 0,
@@ -101,7 +100,6 @@ impl Default for Opts {
                 .into(),
                 node::rekey::Rekey {
                     gamemode: Gamemode::DanceSingle,
-                    avoid_shuffle: true,
                     ..default()
                 }
                 .into(),

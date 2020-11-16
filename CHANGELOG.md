@@ -1,10 +1,10 @@
 
-# Planned changes
+# TODO
 
-- In order to make osu!standard-converted maps, make `Remap` have several alternative map-wide
-    pattern sets, where only one is selected using some criteria.
+- Check beatmapset 30876, "Hacking to the gate", since audio is sometimes not playing in StepMania.
+- Check beatmapset 22164, "Firework", since the background image sometimes doesn't show up.
 
-# Wishlist, kinda
+# Maybe?
 
 - Use difficulties from `osu!.db`.
 - Use `.ssc` instead of `.sm`.

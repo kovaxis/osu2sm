@@ -24,7 +24,7 @@ impl Default for Rekey {
         Self {
             from: default(),
             into: default(),
-            gamemode: Gamemode::PumpSingle,
+            gamemode: Gamemode::DanceSingle,
             avoid_shuffle: true,
             weight_curve: vec![(0., 1.), (0.4, 10.), (0.8, 200.), (1.4, 300.)],
         }
@@ -56,20 +56,25 @@ pub struct KeyAlloc {
     last_active: Vec<f64>,
 }
 impl KeyAlloc {
-    pub fn new(weight_curve: &[(f32, f32)], key_count: usize) -> KeyAlloc {
-        let mut points = Vec::with_capacity(weight_curve.len().saturating_sub(1));
+    pub fn new(key_count: usize) -> KeyAlloc {
+        KeyAlloc {
+            weight_points: Vec::new(),
+            default_weight: 1.,
+            last_active: vec![f64::NEG_INFINITY; key_count],
+        }
+    }
+
+    pub fn set_weight_curve(&mut self, weight_curve: &[(f32, f32)]) {
+        self.weight_points.clear();
+        self.weight_points
+            .reserve(weight_curve.len().saturating_sub(1));
         for i in 0..weight_curve.len().saturating_sub(1) {
             let (this_x, this_y) = weight_curve[i];
             let (next_x, next_y) = weight_curve[i + 1];
             let m = (next_y - this_y) / (next_x - this_x);
-            points.push((next_x, m, -this_x * m + this_y));
+            self.weight_points.push((next_x, m, -this_x * m + this_y));
         }
-        let default_weight = weight_curve.last().map(|(_x, y)| *y).unwrap_or(1.);
-        KeyAlloc {
-            weight_points: points,
-            default_weight,
-            last_active: vec![f64::NEG_INFINITY; key_count],
-        }
+        self.default_weight = weight_curve.last().map(|(_x, y)| *y).unwrap_or(1.);
     }
 
     /// Map the amount of time since the key was last active to a choose weight.
@@ -118,7 +123,6 @@ fn rekey(sm: &mut Simfile, conf: &Rekey) -> Result<()> {
     //Keycounts
     let in_keycount = sm.gamemode.key_count() as usize;
     let out_keycount = conf.gamemode.key_count() as usize;
-    trace!("    converting {}K to {}K", in_keycount, out_keycount);
     ensure!(in_keycount > 0, "cannot convert 0-key map");
     ensure!(out_keycount > 0, "cannot convert to 0-key map");
 
@@ -131,9 +135,11 @@ fn rekey(sm: &mut Simfile, conf: &Rekey) -> Result<()> {
         );
         return Ok(());
     }
+    trace!("    converting {}K to {}K", in_keycount, out_keycount);
 
     //The strategy used to choose keys
-    let mut key_alloc = KeyAlloc::new(&conf.weight_curve, out_keycount);
+    let mut key_alloc = KeyAlloc::new(out_keycount);
+    key_alloc.set_weight_curve(&conf.weight_curve);
 
     //Detach note buffer for lifetiming purposes
     let mut notes = mem::replace(&mut sm.notes, Vec::new());

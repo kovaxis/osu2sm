@@ -222,6 +222,7 @@ pub enum BucketId {
     Null,
     Name(String),
     Nest(Vec<ConcreteNode>),
+    Chain(Vec<ConcreteNode>),
 }
 impl Default for BucketId {
     fn default() -> Self {
@@ -321,6 +322,10 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
             let mut insert_idx = ctx.out.len();
             //Resolve each bucket
             for (kind, bucket) in node.buckets_mut() {
+                let is_chained = match bucket {
+                    BucketId::Chain(..) => true,
+                    _ => false,
+                };
                 let name = match bucket {
                     BucketId::Auto => match kind {
                         BucketKind::Input => last_magnetic_out
@@ -341,14 +346,14 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
                         );
                         mem::replace(name, String::new())
                     }
-                    BucketId::Nest(inner_list) => {
+                    BucketId::Nest(inner_list) | BucketId::Chain(inner_list) => {
                         match kind {
                             BucketKind::Input => {
                                 let into_nested = last_magnetic_out
                                     .take()
                                     .ok_or_else(|| anyhow!("attempt to use input, but previous node does not output (in node {:?})", orig_node))?;
                                 let from_nested = ctx.gen_unique_name();
-                                resolve_layer(ctx, Some(&into_nested), Some(&from_nested), inner_list, false)?;
+                                resolve_layer(ctx, Some(&into_nested), Some(&from_nested), inner_list, is_chained)?;
                                 //Evaluate the current node _after_ the nested node is evaluated
                                 insert_idx = ctx.out.len();
                                 from_nested
@@ -357,7 +362,7 @@ pub fn resolve_buckets(nodes: &[ConcreteNode]) -> Result<Vec<Box<dyn Node>>> {
                                 let into_nested = ctx.gen_unique_name();
                                 let from_nested =
                                     magnetic_out.get_or_insert_with(|| ctx.gen_unique_name());
-                                resolve_layer(ctx, Some(&into_nested), Some(from_nested), inner_list, false)?;
+                                resolve_layer(ctx, Some(&into_nested), Some(from_nested), inner_list, is_chained)?;
                                 into_nested
                             }
                             BucketKind::Generic => bail!("cannot use generic buckets with `Nest`"),
