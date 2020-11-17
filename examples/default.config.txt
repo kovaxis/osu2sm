@@ -1,0 +1,300 @@
+// Example configuration for `osu2sm`, with heavy comments for documentation.
+(
+    // All of the steps that are carried out by the converter.
+    nodes: [
+        // First step: Load osu! beatmaps.
+        OsuLoad((
+            // The osu! song folder.
+            // Setting a path will stop `osu2sm` from asking you each time it runs.
+            input: "",
+            // If the `input` path points to somewhere within an osu! installation, but not to the
+            // song folder itself, fix it.
+            fix_input: true,
+            // Osu! offset. By default this is 0, but note that some osu -> stepmania converters,
+            // notably `OMISM` by BillyMoto, have this set to `77`.
+            offset: 0,
+            // Whether to read `.mp3` audio files to produce more correct preview times, for the
+            // song select wheel song preview.
+            // Disabling this might speed up the conversion process, since several megabytes of
+            // audio files are no longer read.
+            query_audio_len: true,
+            // What StepMania gamemodes to produce.
+            // Every gamemode is associated with a keycount.
+            // For mania beatmaps, only the gamemodes with the same keycount as the beatmap are
+            // produced.
+            // Standard beatmaps work similarly: they are only converted into the gamemodes with
+            // the same amount of keys as the `keycount` config inside `standard` (see below).
+            gamemodes: [
+                DanceThreepanel,
+                DanceSingle,
+                DanceSolo,
+                DanceDouble,
+                PumpSingle,
+                PumpHalfdouble,
+                PumpDouble,
+                Kb7Single,
+                PnmFive,
+                PnmNine,
+            ],
+            // Configuration specific to osu!mania beatmaps.
+            mania: (
+                // Into what node to feed mania-converted beatmaps.
+                // `Auto` means "into the next node".
+                into: Auto,
+                // Further sanity checks, mainly for debugging purposes.
+                check_error: false,
+            ),
+            // Configuration specific to osu!standard beatmaps.
+            standard: (
+                // Into what node to feed standard-converted beatmaps.
+                // `Auto` means "into the next node".
+                into: Auto,
+                // What keycount to convert beatmaps into.
+                // By default, `0` means conversion is disabled.
+                // Set this to `4` to produce stepmania-playable simfiles, or to `7` to produced
+                // `kb7`-gamemode simfiles. 
+                keycount: 0,
+                // A "weight curve" that maps "time since last note" to "likelyhood of being chosen"
+                // for every key column.
+                // This curve dictates how likely are jacks versus alternations.
+                weight_curve: [
+                    // 0 seconds since last key: weight of 1
+                    (0, 1),
+                    // 400ms since last key: 10 times more likely
+                    (0.4, 10),
+                    // 800ms since last key: 20 times more likely
+                    (0.8, 200),
+                    // 1400ms and beyond, 1.5 times more likely
+                    (1.4, 300),
+                ],
+                // Maps distances from the last hit object to amount of simultaneous keys.
+                // For example, streams with hit objects that are very close are mapped to single
+                // notes, while jumps with hit objects that are far away are mapped to chords.
+                dist_to_keycount: [
+                    // 0 osu!pixels to 200 osu!pixels: 1 key.
+                    0,
+                    // 200 osu!pixels to 350 osu!pixels: 2-key chord.
+                    200,
+                    // 350 osu!pixels to 450 osu!pixels: 3-key chord.
+                    350,
+                    // 450 osu!pixels and beyond: 4-key chord.
+                    //
+                    // (The entire playing field is considered as 640x480 osu!pixels.)
+                    450,
+                ],
+                // Controls spinner-to-note conversion.
+                // The amount of notes generated per spinner is calculated by multiplying the
+                // minimum amount of spins required to complete the spinner by this value.
+                steps_per_spin: 1,
+                // Usually bouncing sliders (that is, reversing sliders) are mapped to 1 long note
+                // per bounce, but if bounces are too small (slider spam), this value serves as a
+                // minimum long-note length (in beats).
+                //
+                // By default, slider long notes must be at least a quarter of a beat long (16th
+                // notes).
+                min_slider_bounce: 0.25,
+            ),
+            // Whether to use the unicode osu! names for songs.
+            unicode: false,
+            // Whether to use osu! video files as backgrounds.
+            video: true,
+            // If set to a value smaller than `1`, represents the proportion of beatmapsets allowed
+            // through.
+            //
+            // Mainly used for quick debugging and iteration; converting the entire beatmap
+            // repository on every run was too slow, so instead only a small fraction of the
+            // available beatmaps could be chosen at random to convert.
+            debug_allow_chance: 1,
+            // Random seed for the `debug_allow_chance` chooser.
+            // Only used if that value is less than `1`.
+            debug_allow_seed: 0,
+            // Beatmapsets containing any of these entries in their names are not converted.
+            blacklist: [],
+            // If not empty, only beatmaps containing at least one of these entries in their names
+            // are converted.
+            whitelist: [],
+            // Ignore "incompatible mode" errors, which can get too noisy and do not add value.
+            ignore_mode_errors: true,
+            // To how many beats to round timing points.
+            // Since timing points are many times off-beat (they are instead intended to _reset_
+            // the beat), they are rounded to the nearest of these.
+            //
+            // Many values can be supplied. They will all be tried in order, until one does not
+            // cause two timing points to overlap.
+            rounding: [
+                4,
+                1,
+                0.5,
+                0.25,
+                0.125,
+                0,
+            ],
+        )),
+        // Second step: convert all loaded simfiles to 4-key "DanceSingle" maps.
+        Rekey((
+            // Take the simfiles from the previous node.
+            from: Auto,
+            // Output the converted simfiles into the next node.
+            into: Auto,
+            // Convert all simfiles into "DanceSingle".
+            gamemode: DanceSingle,
+            // If converting to the same keycount, do not shuffle notes around.
+            avoid_shuffle: true,
+            // Similar to the `OsuLoader -> standard -> weight_curve` field.
+            weight_curve: [
+                (0, 1),
+                (0.4, 10),
+                (0.8, 200),
+                (1.4, 300),
+            ],
+        )),
+        // Third step: rate difficulty values.
+        Rate((
+            // Take the simfiles from the previous node.
+            from: Auto,
+            // Output the simfiles with difficulty information attached into the next node.
+            into: Auto,
+            // How to rate difficulty.
+            // By default, use note density.
+            method: Density((
+                // Note density works by assigning a "halo" to every note.
+                // These halos can overlap, stacking their "density" values.
+                // The final difficulty is the average "density" value throughout the song.
+                halos: [
+                    // A 2-second wide halo with density `0`.
+                    (2, 0),
+                    // A 1-second wide halo with density `1`.
+                    (1, 1),
+                ],
+                // How much weight does every simultaneous key add.
+                simultaneous: [
+                    // The first key adds full density.
+                    1,
+                    // The second simultaneous key only weighs as 75% the density.
+                    0.75,
+                    // The third and beyond keys only weigh as half of a regular note.
+                    0.5,
+                ],
+                // How to average out densities.
+                // Higher values give more weight to short bursts of high density, lower values
+                // give more weight to constant densities throughout the song.
+                exponent: 2,
+            )),
+            // Scale the difficulty values that where output by the rating.
+            //
+            // In this case, map the `[0, 1]` range to the `[0, 60]` range, effectively multiplying
+            // difficulty values `x60`.
+            // (Because `Density` outputs difficulty in notes-per-second, multiplying by 60 gives
+            // notes-per-minute).
+            scale: (0, 1, 0, 60),
+            // Whether to set the numerical difficulty (yes).
+            set_meter: true,
+            // Whether to set the qualitative chart difficulty name.
+            set_diff: [
+                // 60bpm maps to `Beginner` (also known as "Novice").
+                (60, Beginner),
+                // 100bpm maps to `Easy`.
+                (100, Easy),
+                // 140bpm maps to `Medium`.
+                (140, Medium),
+                // 180bpm maps to `Hard`.
+                (180, Hard),
+                // 220bpm maps to `Challenge`.
+                (220, Challenge),
+                // 260bpm maps to `Edit`.
+                (260, Edit),
+                // Awful rating, but whatever.
+            ],
+        )),
+        // Fourth step: solve difficulty name conflicts, and limit to 6 difficulties at max.
+        //
+        // This step is very important, since stepmania only allows up to 6 difficulties: Novice,
+        // Easy, Medium, Hard, Challenging and Edit.
+        // If two charts with the same difficulty appear in a simfile, only one is used.
+        // Stupid system, yes.
+        Select((
+            // Take simfiles from the previous node.
+            from: Auto,
+            // Output the selected simfiles into the next node.
+            into: Auto,
+            // Simfiles can be grouped into "lists", and `merge` flattens those lists.
+            // Lists are not used in the default configuration, so this field doesn't matter in
+            // this case.
+            merge: true,
+            // At most, how many difficulties to output.
+            max: 6,
+            // How to discard difficulties.
+            // `Spread` means, "maximize the numerical distance between difficulties".
+            prefer: Spread,
+            // Deduplicate difficulties if they are less than this numerical distance apart.
+            // `0` means "do not deduplicate".
+            dedup_dist: 0,
+            // When deduplicating, choose the most central difficulty.
+            // `0` would mean "the easiest difficulty", and `1` would mean "the hardest difficulty".
+            dedup_bias: 0.5,
+            // Which difficulty names to choose from.
+            diff_names: [
+                Beginner,
+                Easy,
+                Medium,
+                Hard,
+                Challenge,
+                Edit,
+            ],
+        )),
+        // Fifth and final step: take the selected difficulties and write them as simfiles.
+        SimfileWrite((
+            // Take the simfiles from the previous node.
+            from: Auto,
+            // Methods to try to use to copy audio and image files.
+            copy: [
+                // First option: make a hardlink.
+                //  Pros: Does not consume extra disk space, very fast.
+                //  Cons: Cannot link accross disk drives, to the average user it seems like it
+                //      *does* consume space.
+                Hardlink,
+                // Second option: make a copy.
+                //  Pros: Works everywhere.
+                //  Cons: Consumes extra disk space, quite slow.
+                Copy,
+                // Third option: make a symlink.
+                //  Pros: Works across disk drives, consumes no extra space, very fast.
+                //  Cons: Requires admin privileges on Windows.
+                Symlink,
+                // Last resort: just check whether the files are identical.
+                //  Pros: At least it won't error if the files are already copied.
+                //  Cons: Does not actually copy anything.
+                AssertIdentical,
+            ],
+            // Attempt to create a symlink at `output` that points to `input`, and avoid copying
+            // any files if that succeeds.
+            //
+            // If `output` is the same as `input`, it won't even create a link, and will work
+            // without admin privileges. Similarly, if the link is already created, it will not
+            // require admin privileges.
+            in_place: true,
+            // If `true`, remove *all* files under `output` matching the pattern `osu2sm-*.sm`,
+            // with the `*` matching anything.
+            // This will remove any leftover simfiles from previous runs.
+            cleanup: false,
+            // If `output` points to somewhere within a StepMania installation, but not at a song
+            // group exactly, fix the path in order to do so.
+            fix_output: true,
+            // The path to a StepMania song group folder.
+            // Setting a path will stop `osu2sm` from asking you each time it runs.
+            output: "",
+        )),
+    ],
+    // Extra sanity checks after every step.
+    sanity_check: false,
+    // What to log.
+    // Log levels are, from least verbose to most verbose: `error`, `warn`, `info`, `debug` and
+    // `trace`.
+    log: "info",
+    // Enable logging to a file.
+    log_file: true,
+    // Enable logging to the console (through `stderr`).
+    log_stderr: true,
+    // Enable logging to the console (through `stdout`).
+    log_stdout: false,
+)

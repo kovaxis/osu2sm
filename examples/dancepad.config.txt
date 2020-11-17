@@ -1,0 +1,139 @@
+// Config file for `osu2sm`, tuned for usage with a 4-key dancemat.
+(
+    nodes: [
+        OsuLoad((
+            input: "",
+            fix_input: true,
+            offset: 77,
+            query_audio_len: true,
+            mania: (
+                check_error: false,
+                into: Chain([
+                    Pipe((
+                        from: Nest([
+                            Align(( to: 2 )),
+                            Align(( to: 1 )),
+                            Align(( to: 0.5 )),
+                        ]),
+                    )),
+                    Simultaneous(( max_keys: 2 )),
+                    Rekey(( gamemode: DanceSingle )),
+                ]),
+            ),
+            standard: (
+                keycount: 4,
+                dist_to_keycount: [0, 250],
+                into: Nest([
+                    //Easy patternset: aligned to 1, restricted doubles
+                    Remap((
+                        gamemode: DanceSingle,
+                        pattern_sets: [(
+                            default_unit: 4,
+                            patterns: [
+                                (   dist: 1.5,
+                                    keys: 1.5,
+                                    notes: [(0, 0), (0, 1), (1, 2), (2, 3), (3, 4)]),
+                                (   dist: 3,
+                                    keys: 1,
+                                    notes: [(0, 0), (1, 1), (2, 2), (3, 3)]),
+                            ],
+                        )],
+                    )),
+                    //Medium patternset: mostly aligned to 1 (some to 1/2), doubles and halfsteps are exclusive
+                    Remap((
+                        gamemode: DanceSingle,
+                        pattern_sets: [(
+                            default_unit: 4,
+                            patterns: [
+                                (   dist: 0.75,
+                                    keys: 1,
+                                    notes: [(0, 0), (0.5, 1), (1, 2), (1.5, 3), (2, 4), (3, 5)]),
+                                (   dist: 1.8,
+                                    keys: 1.3,
+                                    notes: [(0, 0), (0, 1), (1, 2), (1, 3), (2, 4), (2, 5), (3, 6), (3, 7)]),
+                                (   dist: 3,
+                                    keys: 1,
+                                    notes: [(0, 0), (0, 1), (1, 2), (2, 3), (3, 4)]),
+                            ],
+                        )],
+                    )),
+                    //Hard patternset: aligned to 1/2, double-halfstep mixed bars
+                    Remap((
+                        gamemode: DanceSingle,
+                        pattern_sets: [(
+                            default_unit: 4,
+                            patterns: [
+                                (   dist: 0.7,
+                                    keys: 1.5,
+                                    notes: [(0, 0), (0, 1), (0.5, 2), (1, 3), (1.5, 4), (2, 5), (2.5, 6), (3, 7), (3.5, 8)]),
+                                (   dist: 0.7,
+                                    keys: 1,
+                                    notes: [(0, 0), (0.5, 1), (1, 2), (1.5, 3), (2, 4), (2.5, 5), (3, 6), (3.5, 7)]),
+                                (   dist: 1.4,
+                                    keys: 1.5,
+                                    notes: [(0, 0), (0, 1), (1, 2), (1.5, 3), (2, 4), (2.5, 5), (3, 6), (3, 7)]),
+                                (   dist: 1.4,
+                                    keys: 1,
+                                    notes: [(0, 0), (0, 1), (1, 2), (1.5, 3), (2, 4), (2.5, 5), (3, 6), (3.5, 7)]),
+                                (   dist: 3,
+                                    keys: 1.5,
+                                    notes: [(0, 0), (0, 1), (1, 2), (1, 3), (2, 4), (2, 5), (3, 6), (3, 7)]),
+                                (   dist: 3,
+                                    keys: 1,
+                                    notes: [(0, 0), (0, 1), (1, 2), (1, 3), (2, 4), (2, 5), (3, 6)]),
+                            ],
+                        )],
+                    )),
+                ]),
+            ),
+            gamemodes: [
+                DanceThreepanel,
+                DanceSingle,
+                DanceSolo,
+                DanceDouble,
+                PumpSingle,
+                PumpDouble,
+                Kb7Single,
+                PnmNine,
+            ],
+            video: true,
+            debug_allow_chance: 1,
+            debug_allow_seed: 0,
+            blacklist: [],
+            whitelist: [],
+        )),
+        Rate((
+            method: Count(( )),
+        )),
+        Select((
+            merge: false,
+            max: 2,
+            prefer: Spread,
+        )),
+        Rate((
+            method: Gap((
+                exponent: 4,
+            )),
+            scale: (0, 1, 0, 6),
+            set_diff: [(6, Beginner), (10, Easy), (14, Medium), (18, Hard), (22, Challenge), (26, Edit)]
+        )),
+        Select(( merge: true )),
+        SimfileWrite((
+            fix_output: true,
+            copy: [
+                Hardlink,
+                Copy,
+                Symlink,
+                AssertIdentical,
+            ],
+            in_place: true,
+            cleanup: true,
+            output: "",
+        )),
+    ],
+    sanity_check: false,
+    log: "info",
+    log_file: true,
+    log_stderr: true,
+    log_stdout: false,
+)

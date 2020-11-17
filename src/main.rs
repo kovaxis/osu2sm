@@ -214,16 +214,23 @@ fn symlink_dir(src: &Path, dst: &Path) -> io::Result<()> {
         }
     };
     if result.is_err() {
-        if let Ok(link_src) = fs::read_link(dst) {
-            if link_src.canonicalize().ok() == src.canonicalize().ok() {
-                //Link already exists
-                debug!(
-                    "  link \"{}\" <- \"{}\" already exists",
-                    src.display(),
-                    dst.display()
-                );
-                return Ok(());
-            }
+        if src.canonicalize().ok() == dst.canonicalize().ok() {
+            //Paths are equivalent!
+            debug!(
+                "  link \"{}\" <- \"{}\" already exists (canonical paths are equivalent)",
+                src.display(),
+                dst.display()
+            );
+            return Ok(());
+        }
+        if src.canonicalize().ok() == fs::read_link(dst).and_then(|p| p.canonicalize()).ok() {
+            //Link already exists
+            debug!(
+                "  link \"{}\" <- \"{}\" already exists",
+                src.display(),
+                dst.display()
+            );
+            return Ok(());
         }
     }
     result

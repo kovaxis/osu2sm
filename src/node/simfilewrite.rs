@@ -6,11 +6,6 @@ use crate::node::prelude::*;
 #[serde(default)]
 pub struct SimfileWrite {
     pub from: BucketId,
-    /// The path to the output directory (a StepMania song group).
-    pub output: String,
-    /// Whether to automatically correct output paths if they point somewhere within a StepMania
-    /// installation.
-    pub fix_output: bool,
     /// Which methods to try for copying "dependency" files, such as `.mp3` and `.jpg` files.
     pub copy: Vec<CopyMethod>,
     /// Attempt to create a symlink from the input root directory to the output `output` directory.
@@ -27,6 +22,11 @@ pub struct SimfileWrite {
     /// Remove all files in the output directory or subdirectories matching the `osu2sm-*.sm`
     /// filename, where `*` stands for anything.
     pub cleanup: bool,
+    /// Whether to automatically correct output paths if they point somewhere within a StepMania
+    /// installation.
+    pub fix_output: bool,
+    /// The path to the output directory (a StepMania song group).
+    pub output: String,
 }
 
 impl Default for SimfileWrite {
