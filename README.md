@@ -8,9 +8,14 @@ Advanced configuration is possible, but a default configuration is provided.
 
 # Getting started
 
-Download the latest binaries and follow the following video:
+Download the [latest binaries](https://github.com/negamartin/osu2sm/releases) and follow the
+following video:
 
 [![osu2sm demo](https://img.youtube.com/vi/l1YLVsiuXZ8/0.jpg)](https://www.youtube.com/watch?v=l1YLVsiuXZ8)
+
+If there are no prebuilt binaries for your platform, you will have to install the Rust toolchain
+and compile it yourself by running `cargo build --release` on the command line.
+Sorry for the inconvenience.
 
 # In-place conversion
 
